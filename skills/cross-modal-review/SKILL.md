@@ -73,13 +73,20 @@ Do NOT invoke for:
 
 1. **Capture the work product.** The brain page, analysis, code diff,
    or decision to be reviewed.
-2. **Load the Contract.** Read the originating skill's Contract section
-   (what was promised).
-3. **Spawn review model.** Send the work + Contract to a different
-   model. Use [conventions/model-routing.md](../conventions/model-routing.md)
+2. **Load the Contract + Quality Rubric.** Read the originating skill's
+   Contract section (what was promised). For artifact reviews (writing /
+   design / brain pages), also load pandastack's shared rubric at
+   `~/site/skills/pandastack/plugins/pandastack/lib/quality-rubric.md`
+   (4-axis SSOT: coherence / originality / craft / functionality).
+   Evaluator-side binding per quality-rubric.md governance moment #3.
+3. **Spawn review model.** Send the work + Contract + Rubric (when
+   loaded) to a different model. Use
+   [conventions/model-routing.md](../conventions/model-routing.md)
    for model selection.
-4. **Grade.** Model evaluates: did the output follow the Contract?
-   Pass / fail with specific citations.
+4. **Grade.** Model evaluates: did the output follow the Contract? Plus
+   per-axis rubric score (1-5) when rubric was loaded. Pass / fail with
+   specific citations. Any rubric axis < 3 = fail gate, send back with
+   anti-pattern named.
 5. **Report.** Present agreement / disagreement to the user. Never
    auto-apply the reviewer's suggestions.
 
