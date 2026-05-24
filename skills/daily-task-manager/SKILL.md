@@ -23,7 +23,7 @@ mutating: true
 ## Contract
 
 This skill guarantees:
-- Tasks stored as a brain page (`ops/tasks.md`) with structured format
+- Tasks stored as a brain page (`tasks/active.md`) with structured format
 - Task lifecycle: add → in-progress → complete | defer
 - Priority levels: P0 (urgent), P1 (today), P2 (this week), P3 (backlog)
 - Completed tasks archived with completion date
@@ -31,14 +31,14 @@ This skill guarantees:
 
 ## Phases
 
-1. **Load current tasks.** `gbrain get ops/tasks` — read the task list.
+1. **Load current tasks.** `gbrain get tasks/active` — read the task list.
 2. **Execute the requested action:**
    - **Add:** Append task with priority, description, due date. Add timeline entry.
    - **Complete:** Mark as done, move to completed section with date.
    - **Defer:** Move to next day/week with reason.
    - **Remove:** Delete from list (rare, prefer complete or defer).
    - **Review:** Display all active tasks by priority.
-3. **Save.** `gbrain put ops/tasks` — write updated task list.
+3. **Save.** `gbrain put tasks/active` — write updated task list.
 
 ## Output Format
 

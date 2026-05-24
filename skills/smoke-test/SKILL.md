@@ -122,6 +122,12 @@ fi
 
 ## Known Issues & Their Auto-Fixes
 
+### Config-based GBrain database not visible to smoke-test
+- **Symptom:** `gbrain smoke-test` reports `GBrain database — no DATABASE_URL or GBRAIN_DATABASE_URL`, while `gbrain doctor` passes because the install uses `~/.gbrain/config.json` or another config-backed connection.
+- **Cause:** Some smoke-test paths check environment variables directly and do not hydrate DB credentials from the GBrain config.
+- **Fix:** Re-run smoke-test with the configured DB URL exported for that command, or patch the smoke-test script to read the same config source as `gbrain doctor`. Do not print the connection string or API keys in the report.
+- **Interpretation:** Treat this as a smoke-test harness limitation, not proof the database is broken, if `gbrain doctor` and normal CLI operations are healthy.
+
 ### Codex Zod core.cjs Missing (discovered 2026-04-23)
 - **Symptom:** `Cannot find module './core.cjs'` → all Codex ACP sessions fail
 - **Cause:** Zod v4 npm package ships without `core.cjs` in some installs
