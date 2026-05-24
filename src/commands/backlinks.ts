@@ -154,10 +154,20 @@ export function fixBacklinkGaps(brainDir: string, gaps: BacklinkGap[], dryRun: b
     for (const gap of targetGaps) {
       // Compute relative path from target to source
       const targetDir = targetPage.split('/').slice(0, -1);
-      const sourceDir = gap.sourcePage.split('/');
       const depth = targetDir.length;
       const relPrefix = '../'.repeat(depth);
       const relPath = relPrefix + gap.sourcePage;
+
+      // Defensive idempotency: skip if this target already links this exact
+      // source. Key on the precise markdown link target `](${relPath})` that
+      // buildBacklinkEntry embeds, NOT basename. Basename-only would collapse
+      // two distinct sources sharing a filename across dirs (e.g. multiple
+      // `_index.md`) and could false-match a `.bak` file or prose mention.
+      // `content` is read fresh per target and mutated in-loop on append, so
+      // this catches both (a) duplicate gaps for the same source→target pair
+      // and (b) a concurrent autopilot pass that already wrote the entry
+      // while this pass worked off a stale findBacklinkGaps snapshot.
+      if (content.includes(`](${relPath})`)) continue;
 
       const entry = buildBacklinkEntry(gap.sourceTitle, relPath, today);
 

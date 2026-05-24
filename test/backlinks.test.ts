@@ -104,3 +104,43 @@ describe('findBacklinkGaps dedupe (v0.36.x #967 regression)', () => {
     }
   });
 });
+
+describe('fixBacklinkGaps idempotency guard (cross-dir same-basename regression)', () => {
+  // The fixBacklinkGaps guard must key on the exact relPath markdown link,
+  // not basename. Two distinct sources sharing a basename across dirs (e.g.
+  // `topics/a/shared.md` and `topics/b/shared.md`) must each get their OWN
+  // back-link on the same target. A basename-only guard would suppress the
+  // second (substring-matched the first's path) or false-match `.bak` files
+  // or prose mentions of the filename.
+  test('distinct sources sharing a basename are NOT collapsed', async () => {
+    const { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } = await import('fs');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+    const { findBacklinkGaps, fixBacklinkGaps } = await import('../src/commands/backlinks.ts');
+
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-backlink-bn-'));
+    try {
+      mkdirSync(join(dir, 'people'), { recursive: true });
+      mkdirSync(join(dir, 'topics', 'a'), { recursive: true });
+      mkdirSync(join(dir, 'topics', 'b'), { recursive: true });
+      const bobPath = join(dir, 'people', 'bob.md');
+      writeFileSync(bobPath, '---\ntype: person\n---\n# Bob\n\n## Timeline\n\n- **2026-01-01** | created\n');
+      writeFileSync(join(dir, 'topics', 'a', 'shared.md'), '# Topic A\n\nSee [Bob](../../people/bob.md).\n');
+      writeFileSync(join(dir, 'topics', 'b', 'shared.md'), '# Topic B\n\nSee [Bob](../../people/bob.md).\n');
+
+      fixBacklinkGaps(dir, findBacklinkGaps(dir));
+      const content = readFileSync(bobPath, 'utf-8');
+      const refs = (content.match(/Referenced in \[/g) || []).length;
+      expect(refs).toBe(2);
+      expect(content).toContain('](../topics/a/shared.md)');
+      expect(content).toContain('](../topics/b/shared.md)');
+
+      // Idempotent re-run adds nothing.
+      fixBacklinkGaps(dir, findBacklinkGaps(dir));
+      const refs2 = (readFileSync(bobPath, 'utf-8').match(/Referenced in \[/g) || []).length;
+      expect(refs2).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
