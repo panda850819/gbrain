@@ -419,7 +419,15 @@ output. It checks connection, pgvector, RLS, schema version, and embeddings.
 | No pages found | Query before import | Import files into gbrain first |
 | RLS not enabled | Security gap | Run `gbrain init` again (auto-enables RLS) |
 
-## Phase G: Auto-Update Check (if not already configured)
+## Phase G: Auto-Update / Upgrade Maintenance
+
+Use the runbook in `references/gbrain-upgrade-maintenance.md` when upgrading an existing
+install, especially when the local checkout is a user fork or `bun link` source.
+It covers: preserving a backup branch, rebasing/resetting to upstream when the fork is
+stale, validating `gbrain doctor`, cleaning stale `gbrain serve` processes, and checking
+whether feature/integration recommendations duplicate the user's existing workflows.
+
+### Auto-Update Check (if not already configured)
 
 If the user's install did NOT include setting up auto-update checks (e.g., they
 used the manual install path or an older version of the OpenClaw/Hermes paste), offer it:

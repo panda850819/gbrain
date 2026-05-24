@@ -91,3 +91,4 @@ check whenever it detects 2+ active sources. Paste-ready from there.
 - Separate per-source `gbrain sync --source <id>` cron entries when
   `gbrain sync --all --parallel N --workers N` would replace them with
   one line that auto-picks-up future sources.
+- Using Claude Code, Codex, or local crontab as long-term schedulers for Panda-facing workflows that notify Telegram, write brain pages, or need agent judgment. Use Hermes cron for those; reserve launchd for long-lived services and Claude Code/Codex for one-shot worker tasks. See `references/cron-approval-continuation.md` for the continuation pattern when a scheduled job sends an approval message and Panda replies `ok`.
