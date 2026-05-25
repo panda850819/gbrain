@@ -238,6 +238,11 @@
       "name": "eiirp",
       "path": "eiirp/SKILL.md",
       "description": "Everything In Its Right Place — post-work organizer. 7-phase audit: inventory, taxonomy, schema check (via cathedral CLI), file, skill graph audit, verify, report."
+    },
+    {
+      "name": "stock-enrich",
+      "path": "stock-enrich/SKILL.md",
+      "description": "Look up a TW or US stock ticker (or Chinese company name) and enrich companies/<ticker>.md with current financials, executives, and recent news; cross-link into topics/stocks/<sector>-<tw|us>-2026.md sector hub."
     }
   ],
   "dependencies": {
