@@ -1,11 +1,12 @@
 ---
 name: citation-fixer
-version: 1.1.0
+version: 1.2.0
 description: |
   Audit and fix citation formatting across brain pages. Ensures every fact has
   an inline [Source: ...] citation matching the standard format. Extended in
   v0.25.1: scans for broken tweet/post references that lack actual URLs and
-  resolves them via the host's X / Twitter API integration.
+  resolves them via the host's X / Twitter API integration. v1.2.0: Phase 1-2
+  (scan + identify) dispatched to Haiku subagent to cut audit token cost ~90%.
 triggers:
   - "fix citations"
   - "fix broken citations"
@@ -39,6 +40,73 @@ This skill guarantees:
   X API and patched with deterministic `https://x.com/<handle>/status/<id>`
   links.
 - Results reported with counts (scanned, fixed, remaining).
+
+## Execution dispatch (v1.2.0)
+
+Phases 1 (scan) and 2 (identify issues) are **pure structural detection** —
+regex + format spec comparison, no voice judgment, no cross-page synthesis.
+These phases SHOULD be dispatched to a Haiku 4.5 subagent via the Agent tool
+when scanning >20 pages, to cut audit cost ~90%.
+
+| Phase | Model | Why |
+|---|---|---|
+| 1 Scan pages | **Haiku** subagent | Pure file read + regex; Haiku-grade task |
+| 2 Identify issues | **Haiku** subagent (same batch) | Spec comparison; structured output |
+| 3 Fix format | **Opus** main | Rewriting needs context judgment |
+| 4 Resolve tweets | **Opus** main | X API + entity matching + judgment |
+| 5 Report | **Bash** or main | Pure aggregation |
+
+### Dispatch pattern (Phases 1-2)
+
+For each batch of 10 brain pages, the orchestrator (main Opus session) calls:
+
+```
+Agent({
+  description: "Citation audit batch N",
+  subagent_type: "Explore",          # read-only is enough
+  model: "haiku",
+  prompt: """
+    Audit these N pages for citation format issues. Spec: every fact must have
+    an inline `[Source: ...]` citation matching one of these shapes:
+
+      - User statement: [Source: User, {context}, YYYY-MM-DD]
+      - Web: [Source: {publication}, {URL}, YYYY-MM-DD]
+      - Social: [Source: X/@handle, YYYY-MM-DD](URL)
+      - Synthesis: [Source: compiled from {sources}]
+      - (full spec at ~/gbrain/skills/conventions/quality.md)
+
+    Pages:
+      - path1
+      - path2
+      ...
+
+    For each page return JSON:
+      {
+        "path": "...",
+        "issues": [
+          { "line": 42, "type": "missing_date|missing_url|wrong_format|no_citation",
+            "snippet": "<= 80 chars" },
+          ...
+        ]
+      }
+
+    Rules:
+      - Do NOT fix; detect only.
+      - Skip frontmatter, headings, bullet list scaffolds.
+      - Report under 500 tokens total. If >500 tokens of issues, return the
+        worst 10 per page and a 'truncated: true' flag.
+  """
+})
+```
+
+The subagent returns structured findings (< 500 tokens). Main session reads
+the result and decides which issues warrant Phase 3 fix (which stays on Opus).
+
+### When NOT to dispatch
+
+- Single-page manual fix request ("fix citations on this page")
+- < 20 pages to scan total — subagent startup overhead > Haiku savings
+- Tweet resolution (Phase 4) — needs X API state + judgment, keep on Opus
 
 ## Phases
 
