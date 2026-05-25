@@ -1,12 +1,15 @@
 ---
 name: citation-fixer
-version: 1.2.0
+version: 1.2.1
 description: |
   Audit and fix citation formatting across brain pages. Ensures every fact has
   an inline [Source: ...] citation matching the standard format. Extended in
   v0.25.1: scans for broken tweet/post references that lack actual URLs and
   resolves them via the host's X / Twitter API integration. v1.2.0: Phase 1-2
-  (scan + identify) dispatched to Haiku subagent to cut audit token cost ~90%.
+  (scan + identify) dispatched to subagent for cost cut. v1.2.1: production-run
+  caveat — Sonnet not Haiku, 10-page batches, sequential not parallel, retry on
+  format drift. Empirical: 20-page Haiku batches drift to prose ~60% of runs;
+  5-parallel dispatch triggers "prompt too long" rejections on later batches.
 triggers:
   - "fix citations"
   - "fix broken citations"
@@ -41,30 +44,48 @@ This skill guarantees:
   links.
 - Results reported with counts (scanned, fixed, remaining).
 
-## Execution dispatch (v1.2.0)
+## Execution dispatch (v1.2.1)
 
 Phases 1 (scan) and 2 (identify issues) are **pure structural detection** —
 regex + format spec comparison, no voice judgment, no cross-page synthesis.
-These phases SHOULD be dispatched to a Haiku 4.5 subagent via the Agent tool
-when scanning >20 pages, to cut audit cost ~90%.
+These phases SHOULD be dispatched to a **Sonnet 4.6** subagent via the Agent
+tool when scanning >20 pages, to cut audit cost ~70-80%.
 
 | Phase | Model | Why |
 |---|---|---|
-| 1 Scan pages | **Haiku** subagent | Pure file read + regex; Haiku-grade task |
-| 2 Identify issues | **Haiku** subagent (same batch) | Spec comparison; structured output |
+| 1 Scan pages | **Sonnet** subagent | Pure file read + regex; reliable JSON-strict output |
+| 2 Identify issues | **Sonnet** subagent (same batch) | Spec comparison; structured output stable at scale |
 | 3 Fix format | **Opus** main | Rewriting needs context judgment |
 | 4 Resolve tweets | **Opus** main | X API + entity matching + judgment |
 | 5 Report | **Bash** or main | Pure aggregation |
 
+### Why Sonnet, not Haiku (v1.2.1 production-run finding)
+
+Empirical 100-page run (2026-05-26):
+
+| Issue | Observed rate | Root cause |
+|---|---|---|
+| JSON-strict output drift to prose | ~60% on 20-page batches | Haiku 4.5 instruction-following degrades past ~10-page workload |
+| Hallucinated meta-narrative (Haiku invents "previous subagent violated TEXT-ONLY") | 1/5 batches | Haiku confuses parallel-dispatch context |
+| "Prompt is too long" rejections | 2/5 parallel batches | 5-way fan-out from one main message exceeds aggregate context budget |
+
+**Net:** only 20% of 5-parallel Haiku batches returned actionable JSON. Cost
+savings vanish when 80% of dispatches are unusable.
+
+**Sonnet 4.6 holds JSON-strict output at 20-page batches**, costs ~3x Haiku
+but ~10x cheaper than Opus, and parallel fan-out doesn't trigger the
+context-budget gate at 2 concurrent batches. Net saving still 70-80% vs all-Opus.
+
 ### Dispatch pattern (Phases 1-2)
 
-For each batch of 10 brain pages, the orchestrator (main Opus session) calls:
+For each batch of **10 brain pages** (NOT 20), the orchestrator (main Opus
+session) calls **sequentially or 2-parallel max**:
 
 ```
 Agent({
   description: "Citation audit batch N",
   subagent_type: "Explore",          # read-only is enough
-  model: "haiku",
+  model: "sonnet",                    # NOT haiku for batches >5 pages
   prompt: """
     Audit these N pages for citation format issues. Spec: every fact must have
     an inline `[Source: ...]` citation matching one of these shapes:
@@ -80,33 +101,60 @@ Agent({
       - path2
       ...
 
-    For each page return JSON:
+    For each page return JSON. Top 5 issues per page maximum.
+    Output ONE JSON object only, no prose, no preamble:
+
       {
-        "path": "...",
-        "issues": [
-          { "line": 42, "type": "missing_date|missing_url|wrong_format|no_citation",
-            "snippet": "<= 80 chars" },
-          ...
-        ]
+        "audit": [
+          { "path": "...", "line_count": N,
+            "issues": [
+              { "line": 42, "type": "missing_date|missing_url|wrong_format|no_citation",
+                "snippet": "<= 60 chars" } ] } ],
+        "summary": { "pages_scanned": N, "total_issues": N,
+                     "by_type": { "no_citation": N, "missing_date": N,
+                                  "missing_url": N, "wrong_format": N } }
       }
 
     Rules:
       - Do NOT fix; detect only.
-      - Skip frontmatter, headings, bullet list scaffolds.
-      - Report under 500 tokens total. If >500 tokens of issues, return the
-        worst 10 per page and a 'truncated: true' flag.
+      - Skip frontmatter, headings, bullet list scaffolds, Timeline /
+        Cross-references sections, "待補"/"TBD"/"TODO" markers.
+      - JSON only. No prose. No analysis section. No <summary> tags.
   """
 })
 ```
 
-The subagent returns structured findings (< 500 tokens). Main session reads
-the result and decides which issues warrant Phase 3 fix (which stays on Opus).
+### Retry / fallback protocol
+
+If subagent output is not parseable JSON:
+
+1. **First failure** → re-dispatch same batch with stricter prompt addendum:
+   "Your previous response contained prose. Output ONLY the JSON object,
+    nothing before or after. Begin response with `{` and end with `}`."
+2. **Second failure** → bump to Opus for that batch (cost-trade vs unblock).
+3. **Log the failure** in the run report so Sonnet vs Opus split can be
+   monitored over time.
+
+### Sequencing rules
+
+- **Maximum 2 parallel subagents** at any time. Higher fan-out triggers
+  "Prompt is too long" rejections on later batches.
+- **Batch size: 10 pages** (not 20). Smaller batches improve JSON-strict
+  output reliability and bound the retry cost.
+- **Total throughput**: ~100 pages = 10 batches × 10 pages, dispatched
+  in 5 waves of 2-parallel = ~5-10 min wall clock.
 
 ### When NOT to dispatch
 
 - Single-page manual fix request ("fix citations on this page")
-- < 20 pages to scan total — subagent startup overhead > Haiku savings
+- < 20 pages to scan total — subagent startup overhead > Sonnet savings
 - Tweet resolution (Phase 4) — needs X API state + judgment, keep on Opus
+
+### When Haiku IS OK
+
+- ≤ 5 pages per batch
+- Single-batch ad-hoc audit (no parallel dispatch)
+- Format-only check (no semantic judgment about whether a claim is a "fact")
 
 ## Phases
 
