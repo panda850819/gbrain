@@ -253,6 +253,11 @@
       "name": "skill-optimizer",
       "path": "skill-optimizer/SKILL.md",
       "description": "Self-evolving skill optimization via gbrain skillopt — SkillOpt-paper-grounded text-space optimizer with validation gating (median-of-3 + epsilon=0.05), bundled-skill safety, bootstrap review sentinel, per-skill DB lock, and atomic versioned writes."
+    },
+    {
+      "name": "stock-enrich",
+      "path": "stock-enrich/SKILL.md",
+      "description": "Look up a TW or US stock ticker (or Chinese company name) and enrich companies/<ticker>.md with current financials, executives, and recent news; cross-link into topics/stocks/<sector>-<tw|us>-2026.md sector hub."
     }
   ],
   "dependencies": {

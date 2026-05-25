@@ -16,6 +16,7 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | "What do we know about", "tell me about", "search for", "who is", "background on", "notes on" | `skills/query/SKILL.md` |
 | "Who knows who", "relationship between", "connections", "graph query" | `skills/query/SKILL.md` (use graph-query) |
 | Creating/enriching a person or company page | `skills/enrich/SKILL.md` |
+| TW/US stock ticker mention ("NVTS 有什麼消息", "PLTR 補一下", "把這 5 檔的全名跟操盤人查一下", 4-digit TW ticker, 中文股票名) | `skills/stock-enrich/SKILL.md` |
 | Where does a new file go? Filing rules | `skills/repo-architecture/SKILL.md` |
 | "where does this brain page go", "file this in the brain", "brain taxonomist", "taxonomy check", "refile brain page", "which directory does this page go" | `skills/brain-taxonomist/SKILL.md` |
 | "EIIRP", "everything in its right place", "store this research", "put this in the brain", "make this re-doable", "DRY this up", "file all of this", "organize all of this work", "archive this research thread" | `skills/eiirp/SKILL.md` |
