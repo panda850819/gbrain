@@ -3,14 +3,7 @@ name: eiirp
 version: 1.0.0
 prompt_version: 1
 description: |
-  Everything In Its Right Place. The universal post-work organizer. After
-  any significant work session, EIIRP runs a 7-phase audit: (1) inventory
-  every output, (2) walk taxonomy to decide where each lands, (3) check
-  schema-pack consistency against the brain's actual shape, (4) file
-  enriched brain pages, (5) audit the skill graph for DRY+MECE, (6) verify
-  resolvability, (7) report. Named after the Radiohead song. Nothing
-  produced during significant work lives only in chat — knowledge becomes
-  permanent, patterns become reusable.
+  Everything In Its Right Place. The universal post-work organizer. After any significant work session, runs a 7-phase audit: inventory outputs, walk taxonomy, check schema-pack consistency, file enriched pages, audit the skill graph for DRY+MECE, verify resolvability, report. Nothing produced during work lives only in chat.
 triggers:
   - "everything in its right place"
   - "eiirp"
