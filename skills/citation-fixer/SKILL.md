@@ -2,14 +2,7 @@
 name: citation-fixer
 version: 1.2.1
 description: |
-  Audit and fix citation formatting across brain pages. Ensures every fact has
-  an inline [Source: ...] citation matching the standard format. Extended in
-  v0.25.1: scans for broken tweet/post references that lack actual URLs and
-  resolves them via the host's X / Twitter API integration. v1.2.0: Phase 1-2
-  (scan + identify) dispatched to subagent for cost cut. v1.2.1: production-run
-  caveat — Sonnet not Haiku, 10-page batches, sequential not parallel, retry on
-  format drift. Empirical: 20-page Haiku batches drift to prose ~60% of runs;
-  5-parallel dispatch triggers "prompt too long" rejections on later batches.
+  Audit and fix citation formatting across brain pages. Ensures every fact has an inline [Source: ...] citation in standard format. Also scans for broken tweet/post references lacking URLs and resolves them via the host's X/Twitter API. Use when asked to fix citations or audit sourcing.
 triggers:
   - "fix citations"
   - "fix broken citations"
@@ -31,6 +24,13 @@ mutating: true
 >
 > **Output rule:** all links MUST be deterministic (built from API data,
 > not composed by LLM). See [_output-rules.md](../_output-rules.md).
+
+## Operational notes (production-run caveats)
+
+- v0.25.1: scans for broken tweet/post references that lack actual URLs and resolves them via the host's X / Twitter API integration.
+- v1.2.0: Phase 1-2 (scan + identify) dispatched to subagent for cost cut.
+- v1.2.1 production-run caveat: Sonnet not Haiku, 10-page batches, sequential not parallel, retry on format drift.
+- Empirical: 20-page Haiku batches drift to prose ~60% of runs; 5-parallel dispatch triggers "prompt too long" rejections on later batches.
 
 ## Contract
 
