@@ -28,9 +28,16 @@ def main():
     # Derive pending straight from state (status==queued) so a freshly-marked
     # batch is reflected immediately — the manifest is only refreshed by collect.
     state = json.load(open(STATE))
-    pending = [{"key": k, "source": v["source"], "human_chars": v["human_chars"]}
+    pending = [{"key": k, "source": v["source"], "human_chars": v["human_chars"],
+                "user_turns": v.get("user_turns", 0)}
                for k, v in state.items() if v.get("status") == "queued"]
-    pending.sort(key=lambda m: m["human_chars"], reverse=True)
+    # Rank by a SIGNAL proxy, not raw size: char count rewards big *consumed*
+    # content (pasted code-reviews, article summaries) which the gate rejects.
+    # user_turns (distinct human messages) tracks back-and-forth = decisions/
+    # debugging = real signal. Each turn worth ~2000 char-equivalents; human
+    # chars break ties so single-turn-but-rich ingests still rank reasonably.
+    pending.sort(key=lambda m: m["user_turns"] * 2000 + m["human_chars"],
+                 reverse=True)
     batch = pending[:n]
     spec = {
         "distill_prompt": DISTILL_PROMPT,
