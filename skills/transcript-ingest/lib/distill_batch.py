@@ -18,14 +18,19 @@ HOME = os.path.expanduser("~")
 STAGING = os.environ.get(
     "TI_STAGING", os.path.join(HOME, "site/knowledge/brain/.raw/transcript-ingest"))
 SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MANIFEST = os.path.join(STAGING, "_manifest.json")
+STATE = os.path.join(STAGING, "state.json")
 QUEUE = os.path.join(STAGING, "_queue")
 DISTILL_PROMPT = os.path.join(SKILL, "prompts", "distill_prompt.md")
 
 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 20
-    pending = json.load(open(MANIFEST))
+    # Derive pending straight from state (status==queued) so a freshly-marked
+    # batch is reflected immediately — the manifest is only refreshed by collect.
+    state = json.load(open(STATE))
+    pending = [{"key": k, "source": v["source"], "human_chars": v["human_chars"]}
+               for k, v in state.items() if v.get("status") == "queued"]
+    pending.sort(key=lambda m: m["human_chars"], reverse=True)
     batch = pending[:n]
     spec = {
         "distill_prompt": DISTILL_PROMPT,
