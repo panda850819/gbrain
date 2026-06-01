@@ -124,4 +124,6 @@ def to_text(turns):
 def stats(turns):
     human = sum(len(t) for r, t in turns if r == "user")
     total = sum(len(t) for _, t in turns)
-    return {"turns": len(turns), "human_chars": human, "total_chars": total}
+    user_turns = sum(1 for r, _ in turns if r == "user")
+    return {"turns": len(turns), "user_turns": user_turns,
+            "human_chars": human, "total_chars": total}
