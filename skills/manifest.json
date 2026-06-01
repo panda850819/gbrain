@@ -80,6 +80,11 @@
       "description": "Ingest meeting transcripts with attendee enrichment, entity propagation, and timeline merge."
     },
     {
+      "name": "transcript-ingest",
+      "path": "transcript-ingest/SKILL.md",
+      "description": "Capture AI conversation transcripts (Claude Code / Codex / Hermes jsonl), dedup, gate (novelty + durability), and distill SIGNAL sessions into domain-routed brain notes staged for manual filing."
+    },
+    {
       "name": "citation-fixer",
       "path": "citation-fixer/SKILL.md",
       "description": "Audit and fix citation formatting across brain pages."
