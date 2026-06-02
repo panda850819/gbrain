@@ -44,8 +44,31 @@ def toks(slug):
                if t and t not in STOP and len(t) > 2)
 
 
+def index_filed_keys():
+    """source_key -> first already-filed path, across sessions/ + inbox/.
+
+    Filing was keyed by the LLM-generated title-slug, which varies per run, so a
+    grown session that re-queues + re-distills produced a NEW file instead of
+    updating — spawning duplicate notes for one source_key (observed 2026-06-02).
+    Index by the stable source_key so an already-filed session is skipped, not
+    re-filed. (Skip, not overwrite: never clobber a note Panda may have curated.)
+    """
+    idx = {}
+    for d in (SESS, INBOX):
+        for f in glob.glob(os.path.join(d, "*.md")):
+            try:
+                head = open(f, encoding="utf-8", errors="ignore").read(1500)
+            except Exception:
+                continue
+            m = re.search(r"^source_key:\s*(\S+)", head, re.M)
+            if m:
+                idx.setdefault(m.group(1), f)
+    return idx
+
+
 def main():
     state = json.load(open(STATE)) if os.path.exists(STATE) else {}
+    filed_keys = index_filed_keys()
     existing = {}
     for f in glob.glob(os.path.join(SESS, "*.md")):
         b = os.path.basename(f)[:-3]
@@ -53,10 +76,14 @@ def main():
             continue
         existing.setdefault(b[:10], []).append((b, toks(b[11:])))
 
-    filed = inboxed = 0
+    filed = inboxed = skipped = 0
     for md in sorted(glob.glob(os.path.join(DIST, "**", "*.md"), recursive=True)):
         dom = os.path.basename(os.path.dirname(md))
         key = os.path.basename(md)[:-3]
+        if key in filed_keys:
+            os.remove(md)
+            skipped += 1
+            continue
         body = open(md).read()
         title = next((l.split(":", 1)[1].strip()
                       for l in body.splitlines() if l.startswith("title:")), key)
@@ -87,7 +114,7 @@ def main():
             existing.setdefault(d, []).append((slug, mt))
             os.remove(md)
             filed += 1
-    print(f"filed->sessions {filed} | inboxed {inboxed}")
+    print(f"filed->sessions {filed} | inboxed {inboxed} | skipped-dup {skipped}")
 
 
 if __name__ == "__main__":

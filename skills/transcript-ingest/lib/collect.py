@@ -43,6 +43,37 @@ def _is_sidechain(path):
     return "/subagents/" in path or os.path.basename(path).startswith("agent-")
 
 
+# Distilling spawns its own headless/subagent sessions (the worker is fed the
+# gate + distill prompts plus the pasted source). Those land as fresh top-level
+# jsonl and collect re-ingests them — a self-pollution loop that buried the real
+# backlog (4.6K of 4.7K pending were meta-worker runs, 2026-06-02). Skip any
+# session whose content is itself a distill-worker invocation.
+_META_MARKERS = (
+    "transcript distill worker",
+    "signal gate for a transcript-ingest pipeline",
+    "You process ONE normalized session end-to-end",
+)
+
+
+def _is_distill_worker(text):
+    head = text[:4000]
+    return any(m in head for m in _META_MARKERS)
+
+
+# Disposable-artifact crons (e.g. the daily 台股 morning-note generator) consume
+# brain context and emit a one-off dated line. The gate always rules them NOISE,
+# so skip at collect to keep them out of the queue rather than paying a gate each.
+_DISPOSABLE_MARKERS = (
+    "你是台股籌碼分析師",
+    "寫成「一句」繁中敘事",
+)
+
+
+def _is_disposable_artifact(text):
+    head = text[:2000]
+    return any(m in head for m in _DISPOSABLE_MARKERS)
+
+
 def load_state():
     return json.load(open(STATE)) if os.path.exists(STATE) else {}
 
@@ -54,8 +85,8 @@ def key_for(source, path):
 def main():
     os.makedirs(QUEUE, exist_ok=True)
     state = load_state()
-    counts = {"scanned": 0, "sidechain": 0, "new": 0, "requeued": 0,
-              "dedup": 0, "thin": 0, "empty": 0}
+    counts = {"scanned": 0, "sidechain": 0, "meta": 0, "artifact": 0,
+              "new": 0, "requeued": 0, "dedup": 0, "thin": 0, "empty": 0}
 
     for source, pat in SOURCES:
         for path in glob.glob(pat, recursive=True):
@@ -76,6 +107,12 @@ def main():
                 counts["thin"] += 1
                 continue
             text = to_text(turns)
+            if _is_distill_worker(text):
+                counts["meta"] += 1
+                continue
+            if _is_disposable_artifact(text):
+                counts["artifact"] += 1
+                continue
             sha = hashlib.sha256(text.encode()).hexdigest()[:16]
             prev = state.get(k)
             qfile = os.path.join(QUEUE, k + ".txt")
