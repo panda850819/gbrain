@@ -84,6 +84,26 @@ to the graph (`links` table) with inferred relationship types. Stale links
 (refs no longer in the page text) are removed in the same call. This is
 "auto-link" reconciliation.
 
+#### CLI `gbrain put` pitfall
+
+`gbrain put <slug>` expects a slug, not a markdown filepath. If you pass
+`reports/foo.md` as the slug without `--content`, write-through can create a
+stub duplicate like `reports/foo.md.md`. When indexing an edited local file,
+strip the `.md` extension from the slug and pass the file body explicitly:
+
+```bash
+python3 - <<'PY'
+import pathlib, subprocess
+path = pathlib.Path('reports/foo.md')
+slug = str(path.with_suffix(''))
+subprocess.run(['gbrain', 'put', slug, '--content', path.read_text()], check=True)
+PY
+```
+
+If a `.md.md` duplicate is accidentally created, verify it is a stub, move it
+to Trash rather than deleting permanently, then rerun `gbrain put` with the
+correct slug + `--content` form.
+
 - No manual `add_link` calls needed for ordinary page writes.
 - Inferred link types: `attended` (meeting -> person), `works_at`, `invested_in`,
   `founded`, `advises`, `source` (frontmatter), `mentions` (default).
@@ -92,6 +112,16 @@ to the graph (`links` table) with inferred relationship types. Stale links
 - To disable: `gbrain config set auto_link false`. Default is on.
 - Timeline entries with specific dates still need explicit `gbrain timeline-add`
   (or batch via `gbrain extract timeline --source db`).
+
+#### Maintenance and tooling repairs
+
+For brain health repair passes, fix the layer that owns the problem:
+
+- Valid template / resolver / README examples should not be rewritten to appease lint. If `placeholder-date` or `code-fence-wrap` reports valid examples, narrow the lint rule and add regression tests.
+- If `gbrain extract * --source db` logs Postgres `malformed array literal` for link/timeline batches, suspect array-parameter handling of free-form markdown contexts before blaming the content. Prefer bounded parameterized `VALUES` batches over `unnest($1::text[])` for markdown-heavy fields.
+- Treat high stale-page counts dominated by `people/` and `companies/` as an entity synthesis queue. Cluster by prefix/type/timeline density first; do not bulk rewrite low-signal entity pages just to reduce the metric.
+
+See `references/gbrain-maintenance-debugging.md` for the concrete debugging patterns and verification commands.
 
 ### Phase 3: On Every Outbound Response (READ → PULL → RESPOND)
 
@@ -102,6 +132,16 @@ Before answering any question about a person, company, or topic:
 3. **Respond with context** — the brain makes every answer better
 
 Don't answer from general knowledge when a brain page exists.
+
+#### Expanding Brain Dream / cron summaries
+
+When the user asks to "expand", "展開來說", or explain a Brain Dream / cron output:
+
+1. Read the cron output artifact if a job id or output path is visible.
+2. Search/read the brain pages named or implied by the summary, especially `reflections/dreams/*`, `learnings/*`, `inbox/*`, and the original EOD/session source.
+3. Separate three layers in the response: raw user/source signal, Dream synthesis, and operational consequence.
+4. Preserve open decisions explicitly. Do not auto-resolve content authenticity choices, citation deletion, or irreversible brain cleanups unless the user asked for the action.
+5. Keep the answer as an analyzed expansion, not a task log. Mention paths only when they help the user inspect or continue the thread.
 
 ### Phase 4: Ambient Enrichment
 
@@ -117,6 +157,14 @@ ingest event.
 - Never interrupt the conversation to do enrichment
 - Spawn sub-agents for anything that would slow down the response
 - Never announce "I'm enriching the brain" — just do it silently
+
+### Source-Intake Judgment Ledger
+
+Deterministic cron scripts that produce domain-specific data (health, market) should
+write per-run judgment entries to the source-intake ledger. See
+`references/source-intake-script-pattern.md` for the helper template, field shape,
+and concrete examples. The ledger lives at `.raw/source-intake/judgment-ledger.jsonl`
+and feeds into the weekly EVO review.
 
 ## Output Format
 

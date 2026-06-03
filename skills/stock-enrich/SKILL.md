@@ -2,9 +2,10 @@
 name: stock-enrich
 version: 1.0.0
 description: |
-  Look up a TW or US stock ticker (or Chinese company name) and enrich the brain's
-  companies/<ticker>.md page with current financials, executives, and recent news,
+  Look up a TW or US stock ticker (or Chinese company name) and enrich the INDUSTRY
+  brain's companies/<ticker>.md page with current financials, executives, and recent news,
   then cross-link into the matching topics/stocks/<sector>-<tw|us>-2026.md sector hub.
+  Operates on the industry brain (~/site/knowledge/industry-db/), NOT the personal brain.
   Auto-routes on ticker mentions like "NVTS 有什麼消息嗎"、"把這 5 檔的全名跟操盤人查一下補上"、
   "PLTR 補一下"、"2330 補近期新聞".
 triggers:
@@ -18,6 +19,11 @@ triggers:
   - 訊息含中文股票名（帕蘭泰爾 / 台積電 / 緯創）
   - "<某類股> 有哪些標的"
   - "標的"
+  - "基本面邏輯"
+  - "投資 thesis"
+  - "同產業比較"
+  - "控制點"
+  - "現金流"
 tools:
   - search
   - query
@@ -36,7 +42,30 @@ writes_to:
 
 # Stock Enrich Skill
 
-> **Filing rule:** Read `skills/_brain-filing-rules.md` before creating any new page.
+## Brain target — INDUSTRY brain (not personal)
+
+Since the 2026-05-29 two-brain split, ticker dossiers (`companies/<ticker>.md`) and
+sector hubs (`topics/stocks/*`) live in the **industry brain** (`~/site/knowledge/industry-db/`),
+NOT the personal brain. This skill operates ENTIRELY on the industry brain. Route every
+operation accordingly — getting this wrong re-pollutes the personal brain with the exact
+data the split removed:
+
+- **MCP tools** (`search` / `query` / `get_page` / `put_page` / `add_link` / `add_timeline_entry`):
+  use the `mcp__gbrain_industry__*` server, NOT `mcp__gbrain__*`. (Claude-Code-only; if that
+  server isn't loaded this session, fall back to the CLI below.)
+- **CLI**: prefix EVERY `gbrain` call with `GBRAIN_HOME=~/site/knowledge/industry-db`,
+  e.g. `GBRAIN_HOME=~/site/knowledge/industry-db gbrain query "<ticker>"`. Hybrid query
+  needs the OpenAI key at query time — in a terminal use `zsh -lc 'source ~/.zshrc; GBRAIN_HOME=… gbrain query "…"'`.
+- **File paths**: all `companies/`, `topics/stocks/`, `reports/stocks/` paths in the phases
+  below are relative to `~/site/knowledge/industry-db/`, not the personal brain.
+- **Exception — people/**: executives are personal-relationship entities; `people/*` stays in
+  the PERSONAL brain. Keep executive wiki-links as cross-brain markdown links; do NOT create
+  `people/` pages in industry-db (its RESOLVER forbids them). Any `enrich`-skill delegation for
+  a people stub targets the personal brain.
+
+> **Filing rule:** Read `~/site/knowledge/industry-db/RESOLVER.md` before creating any new page.
+> **Fundamental thesis mode:** When Panda asks for investment logic, fundamental analysis, same-industry comparison, cash flow, control points, or "值不值得研究", use the Brain-aware thesis workflow in `references/fundamental-thesis-check.md` instead of only enriching current facts.
+> **Financial comps / valuation data quality:** When building comps, valuation snapshots, or analyst-facing stock reports from free/open data such as FinMind, use `references/financial-comps-data-quality.md`: normalize raw vendor rows into canonical statement fields, include TW IFRS fields like `OTHNOE`, run invariant checks, and use human-facing labels such as `資料品質註記` instead of engineering jargon.
 
 ## Contract
 
@@ -57,6 +86,43 @@ Fire when any of the following appears in the user message:
 - Phrases: 操盤人, 執行長, CEO, 創辦人, 全名 + ticker context.
 
 Skip when the message is about a sector / index / macro topic without a specific ticker — that goes through `brain-ops` + manual write, not this skill.
+
+## Fundamental thesis mode — Brain-aware reasoning check
+
+Use this mode when Panda asks about:
+- 基本面邏輯 / 投資 thesis / 這家公司值不值得研究
+- 同產業比較 / comparable set / A 為什麼比 B 好
+- 現金流 / control point / 控制點 / 短期爆發
+
+Do **not** treat this as a live-price call or automatic recommendation. The output is a reasoning check that uses Brain pages as the substrate.
+
+Workflow summary:
+1. Brain-first: load company page, sector hub, valuation comp, major-events timeline, and related prior thesis pages.
+2. Build a 3–5 company comparable set from the same sector hub. If Brain lacks enough comps, say `insufficient comps` and list what is missing; do not invent.
+3. Ask the Vincent Yu fundamental-analysis questions:
+   - Why does this company make money?
+   - Can that profit mechanism persist?
+   - What would let it earn more in the future?
+   - Why is A better than B within the same industry?
+   - What is the real value driver of this industry?
+4. Separate the thesis into three lenses:
+   - Cash-flow quality: revenue quality, margin durability, FCF, ROIC, cyclicality, capex / working-capital burden.
+   - Control points: customer lock-in, bottleneck position, technical threshold, channel, pricing power, regulation / certification, capacity scarcity.
+   - Control-point creation ability: management capital allocation, roadmap, customer-entry ability, move from commodity to module/solution, repeatable engine.
+5. Classify thesis type: `Cash-flow compounder`, `Control-point re-rating`, `Cycle beta`, `Builder/capital-allocation bet`, or `Too hard / insufficient data`.
+6. Prefer writing an analysis report under `reports/stocks/{ticker-or-sector}-fundamental-check-YYYY-MM-DD.md`. Do not stuff volatile financial numbers into sector hubs. If data is missing, write `needs_source`, `missing_comps`, and `questions_to_answer` instead.
+
+Full procedure and template: `references/fundamental-thesis-check.md`.
+
+## Taiwan free comps / analyst-report mode
+
+When Panda asks whether institutional financial-modeling workflows can be forked for free, or asks for analyst-style reports using Taiwan stocks, use `references/tw-free-comps-finmind.md`.
+
+Key defaults:
+- FinMind free data is enough for a basic Taiwan comps layer: TTM revenue, margins, EPS, market cap, P/E, P/B, P/S, EV/Revenue.
+- For Telegram-delivered or Quick Look-previewed xlsx reports, write static computed values, not Excel formulas. `openpyxl` writes formulas but does not calculate cached results, so previews can show blank/0 formula cells.
+- Normalize operating income as `GrossProfit - OperatingExpenses` when FinMind's reported `OperatingIncome` materially disagrees with statement structure. Keep the mismatch in a visible `DQ Flag` column instead of silently trusting or hiding it.
+- Treat `DQ Flag` as part of the deliverable. Analyst-quality output surfaces data-quality exceptions.
 
 ## Phases
 

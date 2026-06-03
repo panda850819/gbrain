@@ -99,6 +99,18 @@ Run these queries to populate the briefing sections:
 - `gbrain query "pending commitments follow-ups"` -- open threads and action items
 - `gbrain search --type person --sort updated --limit 10` -- people in play
 
+## Reflective Question Discipline
+
+When a briefing includes a daily reflection, "question to sit with", or one-line DM hook, keep it concrete enough for Panda to use that morning:
+
+- Name the object under reflection: a company, thesis, page, project, decision, or relationship.
+- Offer 2-3 competing interpretations or criteria, not abstract nouns alone.
+- Include one observable criterion that would separate the options.
+- Keep the question answerable in 2-3 sentences by thinking, not by doing a task.
+
+Bad: `留下的是 conviction、控制點，還是熟悉敘事？` This is too vague.
+Good: `如果只用一個條件決定是否保留強茂，是 SiC / 車規 ramp 證據、AI PSU 訂單能見度，還是技術面 breakout？哪一個不成立就該退出？`
+
 ## Output Format
 
 ```
@@ -142,6 +154,7 @@ When presenting facts from brain pages, include inline citations:
 - **Stale context presented as current.** If a page hasn't been updated in 30+ days, flag the staleness explicitly rather than presenting it as fresh.
 - **Modifying brain pages unprompted.** The briefing is read-only by default. Do not create or update pages unless the user explicitly requests it.
 - **Ignoring coverage gaps.** When a meeting participant has no brain page, say so. Silence about gaps hides ignorance.
+- **Vague reflective prompts.** Avoid abstract morning questions that only ask Panda to choose between labels like conviction/control point/narrative. Tie the question to a named object and a concrete discriminator.
 
 ## Tools Used
 

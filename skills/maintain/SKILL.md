@@ -50,6 +50,14 @@ This skill guarantees:
 
 ## Phases
 
+### Triage first: doctor score vs content health score
+
+When a hygiene cron reports both `gbrain doctor` and `gbrain health`, do not conflate them:
+- `gbrain doctor --json` is infrastructure/system health. Fix active failures there first: resolver reachability, skill conformance, sync failures, missing embeddings, schema/RLS/vector checks.
+- `gbrain health` is content graph quality. Large orphan/stale counts often need product judgment, not blind mechanical repair.
+
+For the detailed playbook covering active vs historical sync failures, workspace resolver traps such as `/Users/panda/clawd`, and orphan/stale classification, see `references/gbrain-doctor-vs-health-triage.md`.
+
 ### Autonomous path (v0.36.4.0) — when you want to reach a target score
 
 If the user asks "get my brain to 90/100" or "fix what's broken", prefer the
@@ -76,6 +84,22 @@ Use the per-dimension walk below (Phase 2 onward) when:
 - You're investigating why score is stuck below `--remediate`'s ceiling
 - A specific dimension needs manual judgment that the auto path skips
 
+### Resolver health remediation
+
+When `gbrain doctor` reports `resolver_health` failures, do not assume the skill file is missing. First check the resolver syntax and skill manifest:
+
+```bash
+gbrain check-resolvable /path/to/skills --json
+```
+
+Common durable fixes:
+- Resolver entries must be Markdown table rows with backtick-wrapped paths like `` `skills/agent-browser/SKILL.md` ``. Bullet lists that look readable to humans may be invisible to the resolver parser.
+- If `skills/manifest.json` is missing, add one listing each skill's `name`, `path`, and `description`.
+- Keep `name:` in each `SKILL.md` aligned with the directory class name, e.g. `agent-browser`, to avoid orphan-trigger warnings.
+- If embeddings are blocked because credentials only load through the user's shell profile, run embedding commands through `zsh -lc 'source ~/.zshrc >/dev/null 2>&1; gbrain embed --stale'`.
+
+See `references/resolver-health-remediation.md` for a compact recipe and examples.
+
 ### Manual path
 
 1. **Run health check.** Check gbrain health to get the dashboard.
@@ -85,11 +109,13 @@ Use the per-dimension walk below (Phase 2 onward) when:
 Pages where compiled_truth is older than the latest timeline entry. The assessment hasn't been updated to reflect recent evidence.
 - Check the health output for stale page count
 - For each stale page: read the page from gbrain, review timeline, determine if compiled_truth needs rewriting
+- If a whole topic/entity cluster became stale only because `gbrain extract all --source db` materialized timeline rows from already-current source files, use the mechanical batch-refresh pattern in `references/brain-hygiene-feed-and-stock-pitfalls.md` before rewriting content.
 
 ### Orphan pages
 Pages with zero inbound links. Nobody references them.
 - Review orphans: are they genuinely isolated or just missing links?
 - Add links in gbrain from related pages or flag for deletion
+- If orphans are dominated by raw feed/inbox staging (`inbox/feed/*`, `type: inbox-feed`), treat it as a routing problem first, not a backlink problem. Raw feed intake should live outside the gbrain source tree unless explicitly promoted. See `references/brain-hygiene-feed-and-stock-pitfalls.md`.
 
 ### Dead links
 Links pointing to pages that don't exist.
@@ -349,6 +375,14 @@ nohup gbrain embed --stale > /tmp/gbrain-embed.log 2>&1 &
 Verify sync is running: check `gbrain stats` and confirm `last_sync` is within
 the last 24 hours. If sync has stopped, the brain is drifting from the repo.
 
+### Sync failure history vs active failures
+
+`gbrain doctor` may report historical sync failures separately from active unacknowledged failures.
+- Active unacknowledged failures block health and need action: fix files, then run `gbrain sync --retry-failed`.
+- If the files now sync cleanly but old failure rows remain, run `gbrain sync --skip-failed --yes` to acknowledge historical entries.
+- Common `SLUG_MISMATCH` root cause: frontmatter `slug:` contains only the basename while gbrain derives slug from the full path. Prefer removing `slug:` from staged/imported files or making it path-derived. `gbrain frontmatter validate <path> --fix` can remove many mismatched slug fields safely after audit.
+- Verify with `gbrain doctor --json` and inspect the `sync_failures` check.
+
 ### Stale compiled truth detection
 
 Flag pages where compiled truth is >30 days old but the timeline has recent entries.
@@ -366,6 +400,17 @@ After maintenance runs, save a report:
 - Outstanding issues requiring user attention
 
 This creates an audit trail for brain health over time.
+
+### Hermes cron / CLI-only reporting pitfalls
+
+When running from Hermes cron without MCP, use CLI + filesystem and consult `references/weekly-cron-cli-pitfalls.md` for current gbrain CLI drift.
+
+Key rules:
+- Use `gbrain orphans --json` or `gbrain orphans --count`; do not assume `find_orphans` exists.
+- Prefer `gbrain put <slug> --content ...` over stdin redirection on newer gbrain versions.
+- If DB slugs normalize case, write the normalized DB slug and then write the exact requested filesystem path.
+- If `gbrain put` fails on `tags` before page creation, retry the DB write without tags, then keep the filesystem report with repo-conventional frontmatter.
+- Run `gbrain check-backlinks fix` in a loop until `gbrain check-backlinks check` reports no missing back-links; a first fix pass can create second-order backlink requirements.
 
 ## Quality Rules
 

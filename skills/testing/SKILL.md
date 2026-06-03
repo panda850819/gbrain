@@ -28,9 +28,9 @@ mutating: false
 > the test-before-bulk pattern; this skill enforces it across the project's
 > own test suite.
 
-## Two modes
+## Modes
 
-This skill has two related but distinct modes:
+This skill has three related but distinct modes:
 
 1. **Skill conformance validation** — gbrain's own conformance bar
    (the original 1.0 scope). Validates every skill has SKILL.md with
@@ -41,6 +41,12 @@ This skill has two related but distinct modes:
    project's tiered test suite and produces a regression-classified
    report. Used by daily cron, container-restart bootstrap, and
    "how are the tests" prompts.
+
+3. **Skill optimizer before/after experiments** — when Panda wants to try
+   SkillOpt or another skill optimizer, first create a bounded offline eval
+   with baseline metrics, train/val/test splits, and a no-production-mutation
+   rule. See `references/skillopt-before-after-routing.md` for the known-good
+   PangPang/Hermes routing benchmark shape.
 
 Pick the mode by trigger.
 

@@ -559,7 +559,14 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
               const isProtected = !!step.protected;
               const submitOpts = {
                 queue: 'default',
-                idempotency_key: step.idempotency_key,
+                // computeRecommendations() emits stable content-hash keys so
+                // doctor --remediate can replay the same plan deterministically.
+                // Autopilot is a periodic poller: using that key directly
+                // wedges forever after the first completed targeted job,
+                // because MinionQueue.add() returns the historical row instead
+                // of inserting work for the new tick. Scope it to the current
+                // interval slot while preserving the step hash for debugging.
+                idempotency_key: `autopilot-targeted:${step.id}:${step.idempotency_key}:${slot}`,
                 max_attempts: 2,
                 timeout_ms: timeoutMs,
                 maxWaiting: 1,

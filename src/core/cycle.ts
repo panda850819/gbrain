@@ -69,7 +69,13 @@ export type CyclePhase =
   | 'embed' | 'orphans' | 'purge'
   // v0.39 T12: schema-suggest passive trigger (D3 + D4 plan-eng-review).
   // Wraps runSuggest() — same library the CLI verb + EIIRP call.
-  | 'schema-suggest';
+  | 'schema-suggest'
+  // skill-dream: reads recent raw agent transcripts (captured by
+  // ~/.gbrain/capture-transcripts.py), asks Sonnet what skill/config/memory
+  // patches would improve the agent, writes drafts to inbox/skill-proposals/.
+  // Opt-in (dream.skill_dream.enabled) + cooldown. Improves the AGENT, not
+  // the brain's knowledge (that's synthesize). Never auto-applies.
+  | 'skill-dream';
 
 export const ALL_PHASES: CyclePhase[] = [
   'lint',
@@ -120,6 +126,9 @@ export const ALL_PHASES: CyclePhase[] = [
   // is settled; thin wrapper around runSuggest() library. Cheap (heuristic
   // by default; LLM only when chat provider configured).
   'schema-suggest',
+  // skill-dream: agent self-improvement. Runs LATE (independent of brain
+  // state) and BEFORE purge. Opt-in + cooldown gated; best-effort.
+  'skill-dream',
   // v0.26.5: hard-deletes soft-deleted pages and expired archived sources past
   // the 72h recovery window. Runs last so the rest of the cycle sees the
   // recoverable set; the purge then drops what's expired.
@@ -166,6 +175,8 @@ export const PHASE_SCOPE: Record<CyclePhase, PhaseScope> = {
   orphans: 'global',
   purge: 'global',
   'schema-suggest': 'source',
+  // reads brain-wide transcript corpus, writes one draft file — serialize.
+  'skill-dream': 'global',
 };
 
 /**
@@ -198,6 +209,8 @@ const NEEDS_LOCK_PHASES: ReadonlySet<CyclePhase> = new Set([
   'calibration_profile',
   'embed',
   'purge',
+  // writes a draft file + setConfig(last_completion_ts) — coordinate via lock.
+  'skill-dream',
 ]);
 
 export type PhaseStatus = 'ok' | 'warn' | 'fail' | 'skipped';
@@ -1672,6 +1685,42 @@ export async function runCycle(
         } catch (e) {
           phaseResults.push({
             phase: 'schema-suggest',
+            status: 'fail',
+            duration_ms: 0,
+            summary: `error: ${(e as Error).message}`,
+            details: { error: (e as Error).message },
+          });
+        }
+        progress.finish();
+      }
+      await safeYield(opts.yieldBetweenPhases);
+    }
+
+    // ── skill-dream: agent self-improvement ─────────────────────
+    // Reads recent raw agent transcripts → Sonnet proposes skill/config/memory
+    // patches → writes drafts to inbox/skill-proposals/. Opt-in + cooldown
+    // gated inside the phase. Best-effort: failure does not abort the cycle.
+    if (phases.includes('skill-dream')) {
+      checkAborted(opts.signal);
+      if (!engine) {
+        phaseResults.push({
+          phase: 'skill-dream',
+          status: 'skipped',
+          duration_ms: 0,
+          summary: 'no database connected',
+          details: { reason: 'no_database' },
+        });
+      } else {
+        progress.start('cycle.skill_dream');
+        try {
+          const { runPhaseSkillDream } = await import('./cycle/skill-dream.ts');
+          const { result, duration_ms } = await timePhase(() =>
+            runPhaseSkillDream(engine, { brainDir: opts.brainDir, dryRun: !!opts.dryRun }));
+          result.duration_ms = duration_ms;
+          phaseResults.push(result);
+        } catch (e) {
+          phaseResults.push({
+            phase: 'skill-dream',
             status: 'fail',
             duration_ms: 0,
             summary: `error: ${(e as Error).message}`,

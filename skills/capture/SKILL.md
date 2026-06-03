@@ -36,6 +36,16 @@ handles both local and thin-client installs the same way.
 - "Capture this thought" / "save this" / "drop this into my brain" / "remember this"
 - The user pastes content and asks to keep it
 - After a meeting summary, a research note, or any synthesis that should land as a brain page
+- Replies to an EOD Reflection cron prompt should be saved as a dated reflection, not left as chat-only context.
+
+## Special case: EOD reflection replies
+
+When the user replies to the recurring EOD Reflection prompt with a short list of what happened today:
+
+1. Treat it as a personal reflection record, not a generic inbox capture.
+2. Read `~/site/knowledge/brain/RESOLVER.md` before filing, then route to `personal/reflections/YYYY-MM-DD-eod.md` with `type: reflection`, `area: personal`, and a source stamp such as `source: telegram-eod-reflection`.
+3. Preserve the user's concrete bullets, but lightly normalize into readable prose and add backlinks only when the target page is known or already discoverable.
+4. Sync or otherwise verify the page is readable after writing. If `gbrain sync` reports an active lock, wait briefly and retry once before reporting failure.
 
 ## What it does
 

@@ -53,6 +53,34 @@ Every cron job MUST be idempotent:
 
 Job configuration saved. Report: "Job '{name}' scheduled at {cron expression}. Next run: {time}."
 
+## Delivery verification for Telegram channels
+
+When Panda asks a cron job to deliver to a `t.me/<channel>` URL, do not leave the job on `telegram:@username`. Hermes delivery expects numeric Telegram chat IDs and may fail with `invalid literal for int() with base 10`. Resolve the channel username to its numeric chat ID, update the cron `deliver` target to `telegram:<numeric_id>`, then send a real test message before claiming success. If the test fails with `Forbidden: bot is not a member of the channel chat`, tell Panda to add the active bot as a channel member/admin with posting permission, keep the numeric target in the job, and re-test after the permission change. See `references/telegram-channel-cron-delivery.md` for the detailed operator checklist.
+
+## Human-facing cron copy quality
+
+When a Panda-facing cron job needs to publish to a Telegram channel where Hermes' own bot lacks permission, use the n8n/project-bot fallback in `references/telegram-channel-n8n-bot-delivery.md`: set the cron `deliver` to `local`, keep data collection in `script`, and have the cron agent send via Telegram Bot API with the project bot token without printing secrets. This is the preferred pattern for channels like `@pdzeng_talk` that are administered by `@n8n_panda_bot` rather than the Hermes gateway bot.
+
+When a cron job emits a short DM, optimize for immediate usefulness, not cleverness. If the job surfaces a reflective question, it must be concrete enough for Panda to answer in 2-3 sentences:
+- Name the object under reflection, e.g. company, thesis, project, decision, or page.
+- Give 2-3 discriminating options instead of abstract labels.
+- Include one observable criterion that separates the options.
+- Avoid vague abstractions like "conviction / control point / narrative" unless tied to a named object.
+
+Good: `強茂要用 SiC/車規 ramp、AI PSU 訂單能見度，還是技術面 breakout 當保留條件？`
+Bad: `留下的是 conviction、控制點，還是熟悉敘事？`
+
+## Migrating script/no-agent jobs back to Hermes agent
+
+When a Panda-facing cron job previously ran through a script that spawned an external agent (`claude -p`, Claude Code, Codex, OpenCode), migrate it into a Hermes cron agent instead of raising the external agent's turn limit:
+
+1. Inspect the active job first (`hermes cron list` or the cron tool) and preserve schedule, delivery target, workdir, skills, and toolsets.
+2. Update the job with `script` cleared and `no_agent=false`; attach the class-level skills the job should follow, and restrict toolsets to the minimum needed, usually `terminal,file` for local brain maintenance.
+3. Put the prohibition directly in the cron prompt when the failure mode matters: "do not call Claude Code/Codex/OpenCode; do not execute `claude` or `claude -p`; use Hermes tools + local CLI only." Avoid vague wording like "avoid external agents" by itself.
+4. Retire the old script after verifying it is no longer referenced. Prefer moving it to `~/.Trash/<name>.retired-<timestamp>` over deleting it permanently.
+5. Verify by reading the active job record: `script is null`, `no_agent is false`, expected `skills`, expected `enabled_toolsets`, expected `workdir`, and the prompt contains the explicit external-agent prohibitions.
+6. Ignore historical backup/state-snapshot matches unless they are active scheduler inputs; they are recovery records, not live dependencies.
+
 ## Anti-Patterns
 
 - Scheduling jobs at the same minute (:00 for everything)
@@ -61,3 +89,4 @@ Job configuration saved. Report: "Job '{name}' scheduled at {cron expression}. N
 - Jobs that produce different output on re-run (not idempotent)
 - Sending notifications during quiet hours (save to held queue instead)
 - Using Claude Code, Codex, or local crontab as long-term schedulers for Panda-facing workflows that notify Telegram, write brain pages, or need agent judgment. Use Hermes cron for those; reserve launchd for long-lived services and Claude Code/Codex for one-shot worker tasks. See `references/cron-approval-continuation.md` for the continuation pattern when a scheduled job sends an approval message and Panda replies `ok`.
+- Trying to publish to Telegram channels through Hermes' gateway bot when the channel is actually administered by a different project/n8n bot. Use `deliver: local` plus the project bot API fallback in `references/telegram-channel-n8n-bot-delivery.md` instead of repeatedly changing numeric chat IDs.

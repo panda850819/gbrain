@@ -32,14 +32,26 @@ describe('lintContent', () => {
     expect(issues.some(i => i.rule === 'code-fence-wrap')).toBe(true);
   });
 
-  test('detects placeholder dates', () => {
+  test('does not flag internal markdown fences near EOF as page wrapper', () => {
+    const content = '---\ntitle: Test\ntype: note\ncreated: 2026-05-31\n---\n\n# Test\n\n```markdown\n# template\n```';
+    const issues = lintContent(content, 'test.md');
+    expect(issues.some(i => i.rule === 'code-fence-wrap')).toBe(false);
+  });
+
+  test('detects placeholder dates in frontmatter date fields', () => {
     const content = '---\ntitle: Test\ntype: person\ncreated: YYYY-MM-DD\n---\n\n# Test';
     const issues = lintContent(content, 'test.md');
     expect(issues.some(i => i.rule === 'placeholder-date')).toBe(true);
   });
 
-  test('detects XX-XX placeholder dates', () => {
-    const content = '---\ntitle: Test\ntype: person\ncreated: 2026-04-11\n---\n\n# Test\n\n- 2026-XX-XX | Something happened';
+  test('does not flag placeholder date examples outside frontmatter', () => {
+    const content = '---\ntitle: Test\ntype: note\ncreated: 2026-05-31\n---\n\nUse `sessions/YYYY-MM-DD-{slug}.md` for sessions.';
+    const issues = lintContent(content, 'test.md');
+    expect(issues.some(i => i.rule === 'placeholder-date')).toBe(false);
+  });
+
+  test('detects XX-XX placeholder dates in frontmatter date fields', () => {
+    const content = '---\ntitle: Test\ntype: person\ncreated: 2026-XX-XX\n---\n\n# Test\n\n- 2026-XX-XX | Example placeholder in body is ignored';
     const issues = lintContent(content, 'test.md');
     expect(issues.some(i => i.rule === 'placeholder-date')).toBe(true);
   });
@@ -95,6 +107,11 @@ describe('fixContent', () => {
     const fixed = fixContent(input);
     expect(fixed).not.toContain('```');
     expect(fixed).toContain('# Title');
+  });
+
+  test('preserves internal markdown fences even when they close at EOF', () => {
+    const input = '---\ntitle: Test\n---\n\n# Test\n\n```markdown\n# template\n```\n';
+    expect(fixContent(input)).toBe(input);
   });
 
   test('cleans up excessive blank lines after fix', () => {

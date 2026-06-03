@@ -103,7 +103,27 @@ For every person and company mentioned:
 
 A media item is NOT fully ingested until entity propagation is complete.
 
-### Phase 5: Sync
+### Phase 5: Judgment ledger entry
+
+After the brain page and entity propagation are verified, append a source-intake judgment entry so Panda can evaluate routing quality later:
+
+```bash
+~/.hermes/scripts/source-intake-ledger.py --skip-existing --entry '<json>'
+```
+
+Use:
+- `source`: `youtube`, `pdfs_screenshots`, `github_releases_repos`, or the closest registered source.
+- `source_priority`: `p2_user_intent_sources` for files/links Panda explicitly sent; `p3_semi_auto_sources` for standing collectors.
+- `source_id`: URL, file hash/path, video id, or repo URL.
+- `raw_ref`: raw sidecar path or original file path.
+- `linked_nodes`: created media page plus all propagated entity pages.
+- `routing`: `digest` + `brain_page` for most explicit media ingests.
+- `judgment_reason`: explain the Panda brain topology connection.
+
+Ledger path:
+- `~/site/knowledge/brain/.raw/source-intake/judgment-ledger.jsonl`
+
+### Phase 6: Sync
 
 `gbrain sync` to update the index.
 

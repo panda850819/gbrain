@@ -62,6 +62,18 @@ Before skillifying, check:
 
 If no to all three, it's a script, not a skill. Move on.
 
+### Research-doctrine / method-page staging
+
+When a user asks whether a raw investing, research, product, or analysis framework "should be a skill," do not prematurely skillify it just because it is valuable. First decide whether it is already an executable workflow or still a doctrine/spec.
+
+Use this staging path when the idea is valuable but not yet stable:
+1. Create or update a brain method/concept page that names the doctrine and captures principles, guardrails, anti-patterns, and citations.
+2. Create or update a report/spec/template page under the relevant project or `plans/` that defines output fields and acceptance criteria.
+3. Link the method/spec back into the active project page so future agents discover it during brain-first lookup.
+4. Only return to this skill and create a class-level execution skill after 3-5 real cases show stable triggers, field names, data-source priority, and quality criteria.
+
+Pitfall: turning a fresh research doctrine into a skill freezes the wrong abstraction. For Panda's stock-bot work, "Ground Truth → Investment Thesis" belonged first as `concepts/ground-truth-to-investment-thesis` + `plans/tw-stock-ground-truth-report-spec`, not immediately as a Hermes skill.
+
 ## Phase 1: Audit
 
 ```

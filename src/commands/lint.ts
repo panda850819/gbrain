@@ -96,7 +96,9 @@ export function lintContent(content: string, filePath: string): LintIssue[] {
   }
 
   // Rule: Wrapping code fences (```markdown ... ```)
-  if (content.match(/^```(?:markdown|md)\s*\n/m) && content.match(/\n```\s*$/m)) {
+  // Only flag a page-level wrapper. Internal markdown fences are valid content,
+  // even when a later code block closes near EOF.
+  if (content.match(/^```(?:markdown|md)\s*\n[\s\S]*\n```\s*$/)) {
     issues.push({
       file: filePath, line: 1, rule: 'code-fence-wrap',
       message: 'Page wrapped in ```markdown code fences (LLM artifact)',
@@ -105,11 +107,26 @@ export function lintContent(content: string, filePath: string): LintIssue[] {
   }
 
   // Rule: Placeholder dates
+  // Flag only high-risk placeholder dates in frontmatter values. Route docs,
+  // templates, examples, and fenced code blocks legitimately mention
+  // YYYY-MM-DD patterns and should not dominate brain health output.
+  let inFence = false;
+  let inFrontmatter = content.startsWith('---');
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].match(/\bYYYY-MM-DD\b/) || lines[i].match(/\bXX-XX\b/) || lines[i].match(/\b\d{4}-XX-XX\b/)) {
+    const line = lines[i];
+    if (i > 0 && line.trim() === '---' && inFrontmatter) {
+      inFrontmatter = false;
+    }
+    if (line.trim().startsWith('```')) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFrontmatter || inFence) continue;
+    if (line.match(/^\s*(date|created|updated|last_seen|first_seen|published|acquired|ingested_at)\s*:/) &&
+        (line.match(/\bYYYY-MM-DD\b/) || line.match(/\bXX-XX\b/) || line.match(/\b\d{4}-XX-XX\b/))) {
       issues.push({
         file: filePath, line: i + 1, rule: 'placeholder-date',
-        message: `Placeholder date found: ${lines[i].trim().slice(0, 60)}`,
+        message: `Placeholder date found: ${line.trim().slice(0, 60)}`,
         fixable: false,
       });
     }
@@ -195,9 +212,8 @@ export function fixContent(content: string): string {
     fixed = fixed.replace(pattern, '');
   }
 
-  // Fix wrapping code fences
-  fixed = fixed.replace(/^```(?:markdown|md)\s*\n/, '');
-  fixed = fixed.replace(/\n```\s*$/, '');
+  // Fix wrapping code fences only when they wrap the entire page.
+  fixed = fixed.replace(/^```(?:markdown|md)\s*\n([\s\S]*?)\n```\s*$/, '$1');
 
   // Clean up excessive blank lines left by fixes
   fixed = fixed.replace(/\n{3,}/g, '\n\n');

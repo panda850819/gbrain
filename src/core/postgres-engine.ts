@@ -2043,21 +2043,27 @@ export class PostgresEngine implements BrainEngine {
     const fromSourceIds = links.map(l => l.from_source_id || 'default');
     const toSourceIds = links.map(l => l.to_source_id || 'default');
     const originSourceIds = links.map(l => l.origin_source_id || 'default');
-    const result = await sql`
-      INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
-      SELECT f.id, t.id, v.link_type, v.context, v.link_source, o.id, v.origin_field
-      FROM unnest(
-        ${fromSlugs}::text[], ${toSlugs}::text[], ${linkTypes}::text[],
-        ${contexts}::text[], ${linkSources}::text[], ${originSlugs}::text[],
-        ${originFields}::text[], ${fromSourceIds}::text[], ${toSourceIds}::text[],
-        ${originSourceIds}::text[]
-      ) AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field, from_source_id, to_source_id, origin_source_id)
-      JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
-      JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
-      LEFT JOIN pages o ON o.slug = v.origin_slug AND o.source_id = v.origin_source_id
-      ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO NOTHING
-      RETURNING 1
-    `;
+    const values: unknown[] = [];
+    const rows = links.map((_, i) => {
+      const base = i * 10;
+      values.push(
+        fromSlugs[i], toSlugs[i], linkTypes[i], contexts[i], linkSources[i],
+        originSlugs[i], originFields[i], fromSourceIds[i], toSourceIds[i], originSourceIds[i],
+      );
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10})`;
+    }).join(',');
+    const result = await sql.unsafe(
+      `INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
+       SELECT f.id, t.id, v.link_type, v.context, v.link_source, o.id, v.origin_field
+       FROM (VALUES ${rows})
+         AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field, from_source_id, to_source_id, origin_source_id)
+       JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
+       JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
+       LEFT JOIN pages o ON o.slug = v.origin_slug AND o.source_id = v.origin_source_id
+       ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO NOTHING
+       RETURNING 1`,
+      values as Parameters<typeof sql.unsafe>[1]
+    );
     return result.length;
   }
 
@@ -2655,15 +2661,21 @@ export class PostgresEngine implements BrainEngine {
     const summaries = entries.map(e => e.summary);
     const details = entries.map(e => e.detail || '');
     const sourceIds = entries.map(e => e.source_id || 'default');
-    const result = await sql`
-      INSERT INTO timeline_entries (page_id, date, source, summary, detail)
-      SELECT p.id, v.date::date, v.source, v.summary, v.detail
-      FROM unnest(${slugs}::text[], ${dates}::text[], ${sources}::text[], ${summaries}::text[], ${details}::text[], ${sourceIds}::text[])
-        AS v(slug, date, source, summary, detail, source_id)
-      JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
-      ON CONFLICT (page_id, date, summary) DO NOTHING
-      RETURNING 1
-    `;
+    const values: unknown[] = [];
+    const rows = entries.map((_, i) => {
+      const base = i * 6;
+      values.push(slugs[i], dates[i], sources[i], summaries[i], details[i], sourceIds[i]);
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+    }).join(',');
+    const result = await sql.unsafe(
+      `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
+       SELECT p.id, v.date::date, v.source, v.summary, v.detail
+       FROM (VALUES ${rows}) AS v(slug, date, source, summary, detail, source_id)
+       JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
+       ON CONFLICT (page_id, date, summary) DO NOTHING
+       RETURNING 1`,
+      values as Parameters<typeof sql.unsafe>[1]
+    );
     return result.length;
   }
 

@@ -64,9 +64,13 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
    domain and flip state to done, so they never re-gate.
 
 4. **Review + file** (manual, show-and-confirm).
-   Read `_distilled/<domain>/*.md`. For each keeper, file into the matching
-   brain via its RESOLVER (personal `brain/`, yei work-vault/yei-brain, industry
-   `industry-db/`). Verify any second-hand number/address/ticker against source
+   Read `_distilled/<domain>/*.md`. Routing (Panda 2026-06-01):
+   - personal → the personal brain (`brain/sessions/` etc) — anything about Panda.
+   - industry → update into `industry-db/` per its RESOLVER (entity-level: merge
+     into `companies/`, `topics/stocks/`; absorb-first, do not drop session notes).
+   - work-vault is OFF-LIMITS — never write there. yei-domain items stay parked
+     in `brain/inbox/transcript-ingest/` pending Panda's routing call.
+   Verify any second-hand number/address/ticker against source
    before promoting it to an entity-page fact. Then delete or archive the staged note.
 
 ## Output Format
