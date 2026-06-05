@@ -114,6 +114,10 @@ When the user says any of these, route here:
 ## Output rules
 
 - Always run `gbrain frontmatter audit --json` first; never assume a brain is clean.
+- If the user is replying to a cron report with `待人工` / `invalid type` / `missing created/updated`, do not stop just because the current `gbrain frontmatter audit --json` is green. The cron may include semantic/schema checks beyond the structural audit. Reconstruct the pending set from the cron summary, inspect the named paths, and fix the reported semantic fields directly.
+- For semantic checks, ignore sidecar/tooling directories such as `.claude/`, `.git/`, and `node_modules/`; the brain surface is the source tree pages, not hidden worktrees.
+- When a directory is explicitly defined in `RESOLVER.md` but its canonical type is missing from the frontmatter enum, patch `RESOLVER.md` instead of mass-changing valid pages. Example: `reports/...` pages should use `type: report` if reports are a first-class resolver path.
+- For missing `created` / `updated` on dated session, dream, learning, or report pages, use the date encoded in the path/title when clear, then verify.
 - Surface counts to the user in plain language; do not dump raw JSON.
 - For `--fix` operations: state how many files will be modified BEFORE running, then confirm.
 - `SLUG_MISMATCH` fixes remove the frontmatter `slug:` field — gbrain derives slug from path. Mention this when the user's title is intentionally renamed.
@@ -170,6 +174,24 @@ JSON envelope (when `--json` is passed):
 ## Prevention — Writing Valid Frontmatter
 
 **This is the most important section.** Fixing broken frontmatter is good. Not writing broken frontmatter in the first place is better.
+
+### `gbrain capture` type discipline
+
+When recapturing many local brain files, do **not** use `--type auto` as a convenience placeholder. It can persist `type: auto` into YAML frontmatter, which passes simple shape checks but weakens the semantic schema. Infer the type from the path before capture:
+
+```bash
+case "$file" in
+  companies/*) typ=company ;;
+  topics/*) typ=topic ;;
+  concepts/*) typ=concept ;;
+  supply-chain/*) typ=supply_chain ;;
+  reports/*) typ=report ;;
+  *) typ=note ;;
+esac
+GBRAIN_HOME=~/site/knowledge/industry-db gbrain capture --file "$file" --slug "${file%.md}" --type "$typ"
+```
+
+After any bulk capture, scan changed files for `^type:\s*auto$` and patch them back to inferred canonical types before reporting completion.
 
 ### YAML arrays (the historical #1 error source)
 

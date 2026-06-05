@@ -79,10 +79,20 @@ pages immediately with attribution `[Source: User, YYYY-MM-DD]`.
 
 ### Phase 2.5: Structured Graph Updates (automatic)
 
-Every `put_page` call automatically extracts entity references and writes them
+Every page write automatically extracts entity references and writes them
 to the graph (`links` table) with inferred relationship types. Stale links
 (refs no longer in the page text) are removed in the same call. This is
 "auto-link" reconciliation.
+
+For local file-backed workflows, prefer:
+
+```bash
+gbrain capture --file /path/to/page.md --slug <slug> --type <type>
+```
+
+Use this instead of shell-interpolating large Markdown into `gbrain put --content`, especially when content contains code fences, quotes, non-ASCII tree glyphs, or multiline text. `gbrain put --content` is still fine for short already-escaped payloads, but `capture --file` is safer and preserves provenance for agent writes.
+
+**Do not pass `--type auto` in bulk recapture jobs.** Infer the page type from path (`companies/* -> company`, `topics/* -> topic`, `concepts/* -> concept`, `supply-chain/* -> supply_chain`, `reports/* -> report`) and pass that explicit type. After bulk capture, grep changed files for `^type:\s*auto$`; if any appear, patch the frontmatter before final verification.
 
 - No manual `add_link` calls needed for ordinary page writes.
 - Inferred link types: `attended` (meeting -> person), `works_at`, `invested_in`,

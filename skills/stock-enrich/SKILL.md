@@ -38,7 +38,7 @@ writes_to:
 
 > **Filing rule:** Read `skills/_brain-filing-rules.md` before creating any new page.
 
-## Contract
+## When to Use
 
 For any TW/US ticker mention (Chinese or English, full name or symbol), this skill guarantees:
 
@@ -46,6 +46,8 @@ For any TW/US ticker mention (Chinese or English, full name or symbol), this ski
 - The page is cross-linked from the matching `topics/stocks/<sector>-<tw|us>-2026.md` sector hub (ticker added to `ticker_set` if missing).
 - All tickers in a multi-ticker ask are resolved before reporting done.
 - Every claim cited to one source. No silent invention.
+
+Also use this skill when Panda asks to complete or continue the 台股 / 美股 industry database. In that mode, follow `references/industry-db-completion.md`: finish P0 sector `Research OS Coverage` first, then P1 company `Decision-grade coverage`, verify actual files in the parent session, and capture pages into the industry gbrain with `GBRAIN_HOME=~/site/knowledge/industry-db`.
 
 ## Trigger detection (auto-route)
 
@@ -56,7 +58,46 @@ Fire when any of the following appears in the user message:
 - Chinese company name resolvable to an `aliases` entry in an existing `companies/*.md` (probe with `gbrain query`).
 - Phrases: 操盤人, 執行長, CEO, 創辦人, 全名 + ticker context.
 
-Skip when the message is about a sector / index / macro topic without a specific ticker — that goes through `brain-ops` + manual write, not this skill.
+Skip ordinary sector / index / macro questions when the user is only asking for analysis. If the user asks to **complete, refresh, or standardize the stock database / sector hubs**, use the sector-hub Industry OS mode below instead of treating it as a single-ticker enrich task.
+
+## Sector-hub Industry OS completion mode
+
+Use this when Panda asks to complete 台股 / 美股 database coverage, sector hub coverage, or `Research OS Coverage` across `topics/stocks/*`.
+
+1. **Master-first ordering**
+   - Read the relevant master page first:
+     - TW: `topics/stocks/tw-stock-sectors-master-2026.md`
+     - US: `topics/stocks/us-stock-sectors-master-2026.md`
+   - Read `concepts/industry-intelligence-operating-system.md` and the relevant data source map (`tw-stock-data-api-map.md` or `us-stock-data-api-map.md`).
+   - Patch priority into the master page only after the hub files themselves are complete.
+
+2. **Do P0 before completeness**
+   - P0 means decision-grade sector hubs, not every company. Complete the value-chain / bottleneck / demand-owner layer first.
+   - Each P0 hub must get exactly one H2 section: `## Research OS Coverage`.
+   - Required fields inside that section: `Industry Map`, `Company Pool`, `Value Chain`, `Demand / Pain Points`, `Keywords / Narratives`, `Content / Traffic Signals`, `Monitoring Sources`, `Opportunity Map`, `Weekly Reports`.
+   - Add sector-specific layers before generic completeness, for example AI infra value pools, hyperscaler capex ROI risk, CoWoS / ABF / TGV / CPO bottlenecks, power availability / PPA, GLP-1 payer economics, defense procurement models.
+
+3. **Use existing brain sources first**
+   - Do not start with external web for hub-standardization passes. Prefer existing sector hubs, company pages, master pages, and data-source maps.
+   - If adding synthesis from existing brain material, cite it as `[Source: industry brain, YYYY-MM-DD]` or link the exact source page.
+
+4. **Verify actual file state, not subagent summaries**
+   - Subagent summaries can drift. If using subagents, verify directly with file reads/searches or deterministic checks.
+   - Required checks before finalizing:
+     - every target hub has exactly one H2 `## Research OS Coverage`;
+     - frontmatter `updated` contains today's date;
+     - `gbrain capture` succeeds for every modified page;
+     - `gbrain get` or `gbrain query` can retrieve the new section;
+     - `git diff --check` is clean.
+   - If a subagent summary includes a verifier warning, trust the warning until local verification proves the files changed.
+
+5. **After P0**
+   - Mark the master page's priority queue as `P0 已完成（YYYY-MM-DD）`.
+   - Define P1 as company dossier coverage: sector position, revenue driver, customer concentration, margin / cash-flow quality, latest verified events, and linked sector hub.
+
+See `references/industry-os-sector-hub-completion.md` for the canonical P0/P1 checklist used in the 2026-06-04 industry-db refresh.
+
+When Panda asks to keep going until P0/P1/P2 are complete, use `references/industry-os-tiered-rollout.md`. It adds the full tiered workflow: P0/P1 dashboards, P2 lightweight coverage, P2 watchlist dossiers, dangling backlog, explicit-type `gbrain capture`, and verification gates.
 
 ## Phases
 
