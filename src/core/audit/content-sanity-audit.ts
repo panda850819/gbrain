@@ -175,6 +175,8 @@ export interface ContentSanitySummary {
     warn: number;
   };
   by_source: Record<string, number>;
+  /** Events that blocked or hid content, excluding operator-visible warn/flag. */
+  blocking_events: number;
   /** Top junk-pattern names by hit count (sorted desc). */
   top_patterns: Array<{ name: string; count: number }>;
 }
@@ -212,6 +214,7 @@ export function summarizeContentSanityEvents(
     total_events: events.length,
     by_type,
     by_source,
+    blocking_events: by_type.hard_block + by_type.quarantine + by_type.reject + by_type.soft_block,
     top_patterns,
   };
 }

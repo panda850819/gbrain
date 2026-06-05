@@ -1549,6 +1549,18 @@ async function extractTimelineFromDB(
  * make re-extraction idempotent). EVERY processed page is stamped, including
  * zero-link pages — they WERE processed.
  */
+export function extractionStampForPage(updatedAt: Date, versionTs: string): string {
+  const versionMs = new Date(versionTs).getTime();
+  const updatedMs = updatedAt.getTime();
+  const stampMs = Math.max(
+    Number.isFinite(updatedMs) ? updatedMs : 0,
+    Number.isFinite(versionMs) ? versionMs : 0,
+  );
+  // postgres-js / JS Date round PostgreSQL microseconds down to milliseconds.
+  // Add 1ms so rows read at e.g. .884842 do not stay stale as .884000.
+  return new Date(stampMs + 1).toISOString();
+}
+
 async function extractStaleFromDB(
   engine: BrainEngine,
   opts: {
@@ -1635,8 +1647,10 @@ async function extractStaleFromDB(
       // stamp with the row's READ updated_at, NOT now() — a concurrent edit
       // landing between this SELECT and the stamp advances updated_at past the
       // stamped value, so the page stays stale and re-extracts next run instead
-      // of being marked fresh-with-stale-content.
-      processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: page.updated_at.toISOString() });
+      // of being marked fresh-with-stale-content. Also stamp at least the
+      // extractor-version timestamp; otherwise old-but-processed pages remain
+      // stale forever under the `links_extracted_at < versionTs` predicate.
+      processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: extractionStampForPage(page.updated_at, versionTs) });
     }
 
     // Flush NON-swallowing (CDX-4): a throw here propagates out of the sweep so

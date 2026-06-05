@@ -64,6 +64,28 @@ function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
 }
 
+export function sanitizePostgresText(value: string | null): string | null {
+  if (value === null) return null;
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        out += value[i] + value[i + 1];
+        i++;
+      } else {
+        out += '\uFFFD';
+      }
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      out += '\uFFFD';
+    } else {
+      out += value[i];
+    }
+  }
+  return out;
+}
+
 export function getPostgresSchema(
   dims: number = DEFAULT_EMBEDDING_DIMENSIONS,
   model: string = DEFAULT_EMBEDDING_MODEL,
@@ -2437,9 +2459,10 @@ export class PostgresEngine implements BrainEngine {
     // updated_at; sites that omit it fall back to defaultExtractedAt.
     const tss = refs.map(r => r.extractedAt ?? defaultExtractedAt);
     const sql = this.sql;
+    const textArray = (values: Array<string | null>) => sql.array(values.map(sanitizePostgresText), 1009);
     await sql`
       UPDATE pages p SET links_extracted_at = v.ts::timestamptz
-      FROM unnest(${slugs}::text[], ${srcs}::text[], ${tss}::text[]) AS v(slug, source_id, ts)
+      FROM unnest(${textArray(slugs)}::text[], ${textArray(srcs)}::text[], ${textArray(tss)}::text[]) AS v(slug, source_id, ts)
       WHERE p.slug = v.slug AND p.source_id = v.source_id
     `;
   }
@@ -2519,14 +2542,21 @@ export class PostgresEngine implements BrainEngine {
     const originSourceIds = links.map(l => l.origin_source_id || 'default');
     // v0.41.18.0 (A10): link_kind column (v98). NULL = legacy/plain.
     const linkKinds = links.map(l => l.link_kind ?? null);
+    // postgres-js does not infer array parameter OIDs for a bare JS array.
+    // A bare `${contexts}::text[]` can reach Postgres as one malformed array
+    // literal when a long Chinese/wikilink context contains braces, quotes, or
+    // backslashes (#1861). Bind the array type OID (TEXT[] = 1009) directly
+    // so postgres-js serializes a real text[] parameter even before its element
+    // → array type map is warmed by connection metadata.
+    const textArray = (values: Array<string | null>) => sql.array(values.map(sanitizePostgresText), 1009);
     const result = await sql`
       INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, link_kind, origin_page_id, origin_field)
       SELECT f.id, t.id, v.link_type, v.context, v.link_source, v.link_kind, o.id, v.origin_field
       FROM unnest(
-        ${fromSlugs}::text[], ${toSlugs}::text[], ${linkTypes}::text[],
-        ${contexts}::text[], ${linkSources}::text[], ${originSlugs}::text[],
-        ${originFields}::text[], ${fromSourceIds}::text[], ${toSourceIds}::text[],
-        ${originSourceIds}::text[], ${linkKinds}::text[]
+        ${textArray(fromSlugs)}::text[], ${textArray(toSlugs)}::text[], ${textArray(linkTypes)}::text[],
+        ${textArray(contexts)}::text[], ${textArray(linkSources)}::text[], ${textArray(originSlugs)}::text[],
+        ${textArray(originFields)}::text[], ${textArray(fromSourceIds)}::text[], ${textArray(toSourceIds)}::text[],
+        ${textArray(originSourceIds)}::text[], ${textArray(linkKinds)}::text[]
       ) AS v(from_slug, to_slug, link_type, context, link_source, origin_slug, origin_field, from_source_id, to_source_id, origin_source_id, link_kind)
       JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
       JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
@@ -3181,10 +3211,14 @@ export class PostgresEngine implements BrainEngine {
     const summaries = entries.map(e => e.summary);
     const details = entries.map(e => e.detail || '');
     const sourceIds = entries.map(e => e.source_id || 'default');
+    // Use typed postgres.js array parameters for the same reason as
+    // _addLinksBatchOnce: bare JS arrays can serialize as malformed array
+    // literals when long CJK/wiki contexts contain array-special characters.
+    const textArray = (values: Array<string | null>) => sql.array(values.map(sanitizePostgresText), 1009);
     const result = await sql`
       INSERT INTO timeline_entries (page_id, date, source, summary, detail)
       SELECT p.id, v.date::date, v.source, v.summary, v.detail
-      FROM unnest(${slugs}::text[], ${dates}::text[], ${sources}::text[], ${summaries}::text[], ${details}::text[], ${sourceIds}::text[])
+      FROM unnest(${textArray(slugs)}::text[], ${textArray(dates)}::text[], ${textArray(sources)}::text[], ${textArray(summaries)}::text[], ${textArray(details)}::text[], ${textArray(sourceIds)}::text[])
         AS v(slug, date, source, summary, detail, source_id)
       JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
       ON CONFLICT (page_id, date, summary, source) DO NOTHING

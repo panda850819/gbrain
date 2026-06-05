@@ -181,6 +181,7 @@ describe('summarizeContentSanityEvents', () => {
     expect(s.total_events).toBe(0);
     expect(s.by_type).toEqual({ hard_block: 0, quarantine: 0, reject: 0, flag: 0, soft_block: 0, warn: 0 });
     expect(s.top_patterns).toEqual([]);
+    expect(s.blocking_events).toBe(0);
   });
 
   test('counts by type (v0.42 quarantine/reject/flag)', () => {
@@ -194,6 +195,7 @@ describe('summarizeContentSanityEvents', () => {
     ]);
     expect(s.by_type).toEqual({ hard_block: 0, quarantine: 2, reject: 1, flag: 1, soft_block: 1, warn: 1 });
     expect(s.total_events).toBe(6);
+    expect(s.blocking_events).toBe(4);
   });
 
   test('counts by source', () => {

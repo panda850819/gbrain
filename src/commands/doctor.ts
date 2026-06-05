@@ -5571,11 +5571,12 @@ export async function buildChecks(
         .map(([s, n]) => `${s}=${n}`)
         .join(', ');
       const status: 'ok' | 'warn' | 'fail' =
-        events.length >= 100 ? 'fail' : events.length >= 10 ? 'warn' : 'ok';
+        summary.blocking_events >= 100 ? 'fail'
+          : (summary.blocking_events >= 10 || events.length >= 10 ? 'warn' : 'ok');
       checks.push({
         name: 'content_sanity_audit_recent',
         status,
-        message: `${events.length} events (hard=${summary.by_type.hard_block} soft=${summary.by_type.soft_block} warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
+        message: `${events.length} events (blocking=${summary.blocking_events}, hard=${summary.by_type.hard_block}, quarantine=${summary.by_type.quarantine}, reject=${summary.by_type.reject}, flag=${summary.by_type.flag}, soft=${summary.by_type.soft_block}, warn=${summary.by_type.warn})${topPatterns ? ', patterns: ' + topPatterns : ''}${topSources ? ', sources: ' + topSources : ''}. (Local audit only — multi-host operators set GBRAIN_AUDIT_DIR.)`,
       });
     }
   } catch (err) {
