@@ -74,13 +74,53 @@ def index_learning_keys():
     keys = set()
     for f in glob.glob(os.path.join(LEARN, "**", "*.md"), recursive=True):
         try:
-            head = open(f, encoding="utf-8", errors="ignore").read(800)
+            head = open(f, encoding="utf-8", errors="ignore").read(1500)
         except Exception:
             continue
         m = re.search(r"^source_key:\s*(\S+)", head, re.M)
         if m:
             keys.add(m.group(1))
     return keys
+
+
+def promote_learning(body, key, d, slug, title, learned_keys):
+    """Promote a personal session's `## Reusable learning` to a typed learnings/ page.
+    Returns 1 if a page was written, else 0. The caller wraps this in try/except so a
+    failed promotion never blocks the session file from being removed/counted.
+
+    Guards: `learning:` is read from the FRONTMATTER block only (not the body);
+    source_key dedup (skip if already promoted); key char-validation before it enters
+    YAML frontmatter; collision-safe output path (never overwrites a sibling learning
+    with a different source_key). Schema matches the brain learnings corpus:
+    `type: learning` + subtype via the CATMAP directory, `confidence: low` (auto +
+    unverified until promoted), `tags: [auto-learning, <cat>]`."""
+    fm = body.split("---", 2)
+    fmblock = fm[1] if len(fm) >= 3 else ""
+    lc = re.search(r"^learning:\s*(\w+)", fmblock, re.M)
+    if not lc or lc.group(1) not in CATMAP or key in learned_keys:
+        return 0
+    if not re.fullmatch(r"[A-Za-z0-9_.\-]+", key):
+        print(f"learning-promote skipped: unsafe source_key {key!r}")
+        return 0
+    lm = re.search(r"^## Reusable learning\s*\n(.*?)(?=^## |\Z)", body, re.M | re.S)
+    lbody = lm.group(1).strip() if lm else ""
+    if not lbody:
+        print(f"learning-promote skipped: {key} tagged learning:{lc.group(1)} but empty body")
+        return 0
+    cat = lc.group(1)
+    ldir = os.path.join(LEARN, CATMAP[cat])
+    os.makedirs(ldir, exist_ok=True)
+    lpath = os.path.join(ldir, f"{d}-{slug}.md")
+    n = 2
+    while os.path.exists(lpath):
+        lpath = os.path.join(ldir, f"{d}-{slug}-{n}.md")
+        n += 1
+    front = (f"---\ntype: learning\nkey: {slug}\ndate: {d}\n"
+             f"source_key: {key}\nsource: transcript-ingest\n"
+             f"confidence: low\ntags: [auto-learning, {cat}]\n---\n\n")
+    open(lpath, "w").write(front + f"# {title}\n\n" + lbody + "\n")
+    learned_keys.add(key)
+    return 1
 
 
 def main():
@@ -130,21 +170,10 @@ def main():
         else:
             open(os.path.join(SESS, f"{d}-{slug}.md"), "w").write(body)
             existing.setdefault(d, []).append((slug, mt))
-            lc = re.search(r"^learning:\s*(\w+)", body, re.M)
-            if lc and lc.group(1) in CATMAP and key not in learned_keys:
-                lm = re.search(r"^## Reusable learning\s*\n(.*?)(?=^## |\Z)",
-                               body, re.M | re.S)
-                lbody = lm.group(1).strip() if lm else ""
-                if lbody:
-                    ldir = os.path.join(LEARN, CATMAP[lc.group(1)])
-                    os.makedirs(ldir, exist_ok=True)
-                    front = (f"---\ntype: {lc.group(1)}\ndate: {d}\n"
-                             f"source_key: {key}\nsource: transcript-ingest\n"
-                             f"confidence: 6\ntags: [auto-learning]\n---\n\n")
-                    open(os.path.join(ldir, f"{d}-{slug}.md"), "w").write(
-                        front + f"# {title}\n\n" + lbody + "\n")
-                    learned_keys.add(key)
-                    learned += 1
+            try:
+                learned += promote_learning(body, key, d, slug, title, learned_keys)
+            except Exception as e:
+                print(f"learning-promote failed for {key}: {e}")
             os.remove(md)
             filed += 1
     print(f"filed->sessions {filed} | inboxed {inboxed} | "
