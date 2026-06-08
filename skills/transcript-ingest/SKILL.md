@@ -27,7 +27,7 @@ mutating: true
 # Transcript Ingest
 
 Turn the firehose of AI agent conversations into curated brain knowledge.
-`raw jsonl (in place) -> collect/dedup -> gate -> distill -> stage -> manual file`.
+`raw jsonl (in place) -> collect/dedup -> gate -> distill -> stage -> auto-file (personal: sessions + learnings, via drain cron) / manual file (industry, yei: inbox)`.
 
 ## Contract
 
@@ -40,9 +40,16 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
   from the brain (novelty floor + durability test).
 - Staging lives in `brain/.raw/transcript-ingest/` — git-versioned but excluded
   from gbrain import/embed, so raw working files never enter the brain DB.
-- Distilled notes are STAGED only. Filing into the real brain (personal / yei /
-  industry, via each RESOLVER) is manual show-and-confirm. The skill never
-  auto-writes to the embedded brain.
+- Two filing tracks (drain cron auto-runs `lib/file_distilled.py`): **personal**
+  SIGNAL auto-files to `brain/sessions/`, and a durable `## Reusable learning`
+  (tagged `learning: pitfall|pattern|architecture`) auto-promotes to a typed
+  `brain/learnings/` page at `confidence: 6`, deduped by `source_key` — no
+  confirm. **industry / yei / dup** stage in `brain/inbox/transcript-ingest/`
+  for manual RESOLVER filing (work-vault is off-limits). The personal brain is
+  kept current automatically; cross-domain entity filing stays human-gated.
+  (NOTE: Phases 4 / Anti-Patterns / Not-Yet-Wired below still describe the older
+  fully-manual model — pre-existing drift from the auto-drain cron, flagged for a
+  separate reconciliation pass.)
 
 ## Phases
 
@@ -63,7 +70,7 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
    Pipe all worker report lines to `python3 lib/mark.py` to record verdict +
    domain and flip state to done, so they never re-gate.
 
-4. **Review + file** (manual, show-and-confirm).
+4. **Review + file** (industry / yei only — manual, show-and-confirm; personal SIGNAL + tagged learnings auto-file via the drain cron, see Contract).
    Read `_distilled/<domain>/*.md`. For each keeper, file into the matching
    brain via its RESOLVER (personal `brain/`, yei work-vault/yei-brain, industry
    `industry-db/`). Verify any second-hand number/address/ticker against source
@@ -79,8 +86,9 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
 
 ## Anti-Patterns
 
-- Auto-filing distilled notes into the embedded brain. Staging is mandatory;
-  filing is manual.
+- Auto-filing INDUSTRY / YEI notes into entity pages without manual RESOLVER
+  review — those stage in inbox for human filing. (Personal sessions + tagged
+  learnings DO auto-file by design via the drain cron — see Contract.)
 - Promoting a second-hand number/address/ticker from a transcript into an entity
   page without grepping the source. Assistants fabricate mid-session.
 - Admitting disposable artifacts (today's morning note, a weekly report) as
@@ -104,4 +112,4 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
 ## Not Yet Wired
 
 - ChatGPT + Typeless sources (no local jsonl; need export/API into the queue).
-- Distilled -> brain filing is manual by design (could add an assisted filer later).
+- Industry / yei distilled -> brain filing is manual by design (personal auto-files via the drain cron; an assisted filer for cross-domain could come later).

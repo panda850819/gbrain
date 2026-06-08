@@ -18,6 +18,7 @@ type: session
 domain: <personal|yei|industry>
 source_key: <KEY>
 tags: [<3-6 kebab-case tags>]
+learning: <pitfall|pattern|architecture>   # OPTIONAL — omit unless the Reusable learning is durable + reusable beyond this session (see Learning promotion rule)
 ---
 
 ## What happened
@@ -40,6 +41,7 @@ Rules:
 - Only durable, newly-CREATED knowledge (per the gate's novelty + durability tests). Never include disposable artifacts (a dated morning note, a one-off report) or facts merely injected from the brain.
 - Only facts actually present in the transcript. No invention. If a number/address/ticker looks like a second-hand assistant summary, OMIT it rather than risk a fabricated fact entering the brain.
 - Terse. Extract signal, do not recap blow-by-blow.
+- **Learning promotion (flood-gated)**: if `## Reusable learning` holds a lesson reusable BEYOND this one session — a bug class + its fix, a convention, or a design decision — add the frontmatter field `learning: <pitfall|pattern|architecture>` (pitfall = a bug/gotcha + its fix; pattern = a reusable how-to / convention; architecture = a structural or design choice). At filing time this promotes the `## Reusable learning` body to a typed `learnings/` page the planner reads back. OMIT the field for session-specific lessons — most sessions have no `learning:`. At most ONE `learning:` per session (pick the single most reusable lesson).
 
 ## Step 3 — report
 

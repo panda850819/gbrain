@@ -25,6 +25,8 @@ SESS = os.path.join(HOME, "site/knowledge/brain/sessions")
 INBOX = os.path.join(HOME, "site/knowledge/brain/inbox/transcript-ingest")
 STATE = os.path.join(STAGING, "state.json")
 DIST = os.path.join(STAGING, "_distilled")
+LEARN = os.path.join(HOME, "site/knowledge/brain/learnings")
+CATMAP = {"pitfall": "pitfalls", "pattern": "patterns", "architecture": "architecture"}
 STOP = set("the a an and or of to for in on with vs new shipped fix bug decision design".split())
 DATE_RE = re.compile(r"^(20\d\d)-(\d\d)-(\d\d)")
 
@@ -66,9 +68,65 @@ def index_filed_keys():
     return idx
 
 
+def index_learning_keys():
+    """source_key set across brain/learnings/, so a re-distilled session does not
+    re-promote a learning it already produced (mirrors index_filed_keys for sessions)."""
+    keys = set()
+    for f in glob.glob(os.path.join(LEARN, "**", "*.md"), recursive=True):
+        try:
+            head = open(f, encoding="utf-8", errors="ignore").read(1500)
+        except Exception:
+            continue
+        m = re.search(r"^source_key:\s*(\S+)", head, re.M)
+        if m:
+            keys.add(m.group(1))
+    return keys
+
+
+def promote_learning(body, key, d, slug, title, learned_keys):
+    """Promote a personal session's `## Reusable learning` to a typed learnings/ page.
+    Returns 1 if a page was written, else 0. The caller wraps this in try/except so a
+    failed promotion never blocks the session file from being removed/counted.
+
+    Guards: `learning:` is read from the FRONTMATTER block only (not the body);
+    source_key dedup (skip if already promoted); key char-validation before it enters
+    YAML frontmatter; collision-safe output path (never overwrites a sibling learning
+    with a different source_key). Schema matches the brain learnings corpus:
+    `type: learning` + subtype via the CATMAP directory, `confidence: low` (auto +
+    unverified until promoted), `tags: [auto-learning, <cat>]`."""
+    fm = body.split("---", 2)
+    fmblock = fm[1] if len(fm) >= 3 else ""
+    lc = re.search(r"^learning:\s*(\w+)", fmblock, re.M)
+    if not lc or lc.group(1) not in CATMAP or key in learned_keys:
+        return 0
+    if not re.fullmatch(r"[A-Za-z0-9_.\-]+", key):
+        print(f"learning-promote skipped: unsafe source_key {key!r}")
+        return 0
+    lm = re.search(r"^## Reusable learning\s*\n(.*?)(?=^## |\Z)", body, re.M | re.S)
+    lbody = lm.group(1).strip() if lm else ""
+    if not lbody:
+        print(f"learning-promote skipped: {key} tagged learning:{lc.group(1)} but empty body")
+        return 0
+    cat = lc.group(1)
+    ldir = os.path.join(LEARN, CATMAP[cat])
+    os.makedirs(ldir, exist_ok=True)
+    lpath = os.path.join(ldir, f"{d}-{slug}.md")
+    n = 2
+    while os.path.exists(lpath):
+        lpath = os.path.join(ldir, f"{d}-{slug}-{n}.md")
+        n += 1
+    front = (f"---\ntype: learning\nkey: {slug}\ndate: {d}\n"
+             f"source_key: {key}\nsource: transcript-ingest\n"
+             f"confidence: low\ntags: [auto-learning, {cat}]\n---\n\n")
+    open(lpath, "w").write(front + f"# {title}\n\n" + lbody + "\n")
+    learned_keys.add(key)
+    return 1
+
+
 def main():
     state = json.load(open(STATE)) if os.path.exists(STATE) else {}
     filed_keys = index_filed_keys()
+    learned_keys = index_learning_keys()
     existing = {}
     for f in glob.glob(os.path.join(SESS, "*.md")):
         b = os.path.basename(f)[:-3]
@@ -76,7 +134,7 @@ def main():
             continue
         existing.setdefault(b[:10], []).append((b, toks(b[11:])))
 
-    filed = inboxed = skipped = 0
+    filed = inboxed = skipped = learned = 0
     for md in sorted(glob.glob(os.path.join(DIST, "**", "*.md"), recursive=True)):
         dom = os.path.basename(os.path.dirname(md))
         key = os.path.basename(md)[:-3]
@@ -112,9 +170,14 @@ def main():
         else:
             open(os.path.join(SESS, f"{d}-{slug}.md"), "w").write(body)
             existing.setdefault(d, []).append((slug, mt))
+            try:
+                learned += promote_learning(body, key, d, slug, title, learned_keys)
+            except Exception as e:
+                print(f"learning-promote failed for {key}: {e}")
             os.remove(md)
             filed += 1
-    print(f"filed->sessions {filed} | inboxed {inboxed} | skipped-dup {skipped}")
+    print(f"filed->sessions {filed} | inboxed {inboxed} | "
+          f"learned {learned} | skipped-dup {skipped}")
 
 
 if __name__ == "__main__":
