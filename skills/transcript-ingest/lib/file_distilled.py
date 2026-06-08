@@ -25,6 +25,8 @@ SESS = os.path.join(HOME, "site/knowledge/brain/sessions")
 INBOX = os.path.join(HOME, "site/knowledge/brain/inbox/transcript-ingest")
 STATE = os.path.join(STAGING, "state.json")
 DIST = os.path.join(STAGING, "_distilled")
+LEARN = os.path.join(HOME, "site/knowledge/brain/learnings")
+CATMAP = {"pitfall": "pitfalls", "pattern": "patterns", "architecture": "architecture"}
 STOP = set("the a an and or of to for in on with vs new shipped fix bug decision design".split())
 DATE_RE = re.compile(r"^(20\d\d)-(\d\d)-(\d\d)")
 
@@ -66,9 +68,25 @@ def index_filed_keys():
     return idx
 
 
+def index_learning_keys():
+    """source_key set across brain/learnings/, so a re-distilled session does not
+    re-promote a learning it already produced (mirrors index_filed_keys for sessions)."""
+    keys = set()
+    for f in glob.glob(os.path.join(LEARN, "**", "*.md"), recursive=True):
+        try:
+            head = open(f, encoding="utf-8", errors="ignore").read(800)
+        except Exception:
+            continue
+        m = re.search(r"^source_key:\s*(\S+)", head, re.M)
+        if m:
+            keys.add(m.group(1))
+    return keys
+
+
 def main():
     state = json.load(open(STATE)) if os.path.exists(STATE) else {}
     filed_keys = index_filed_keys()
+    learned_keys = index_learning_keys()
     existing = {}
     for f in glob.glob(os.path.join(SESS, "*.md")):
         b = os.path.basename(f)[:-3]
@@ -76,7 +94,7 @@ def main():
             continue
         existing.setdefault(b[:10], []).append((b, toks(b[11:])))
 
-    filed = inboxed = skipped = 0
+    filed = inboxed = skipped = learned = 0
     for md in sorted(glob.glob(os.path.join(DIST, "**", "*.md"), recursive=True)):
         dom = os.path.basename(os.path.dirname(md))
         key = os.path.basename(md)[:-3]
@@ -112,9 +130,25 @@ def main():
         else:
             open(os.path.join(SESS, f"{d}-{slug}.md"), "w").write(body)
             existing.setdefault(d, []).append((slug, mt))
+            lc = re.search(r"^learning:\s*(\w+)", body, re.M)
+            if lc and lc.group(1) in CATMAP and key not in learned_keys:
+                lm = re.search(r"^## Reusable learning\s*\n(.*?)(?=^## |\Z)",
+                               body, re.M | re.S)
+                lbody = lm.group(1).strip() if lm else ""
+                if lbody:
+                    ldir = os.path.join(LEARN, CATMAP[lc.group(1)])
+                    os.makedirs(ldir, exist_ok=True)
+                    front = (f"---\ntype: {lc.group(1)}\ndate: {d}\n"
+                             f"source_key: {key}\nsource: transcript-ingest\n"
+                             f"confidence: 6\ntags: [auto-learning]\n---\n\n")
+                    open(os.path.join(ldir, f"{d}-{slug}.md"), "w").write(
+                        front + f"# {title}\n\n" + lbody + "\n")
+                    learned_keys.add(key)
+                    learned += 1
             os.remove(md)
             filed += 1
-    print(f"filed->sessions {filed} | inboxed {inboxed} | skipped-dup {skipped}")
+    print(f"filed->sessions {filed} | inboxed {inboxed} | "
+          f"learned {learned} | skipped-dup {skipped}")
 
 
 if __name__ == "__main__":

@@ -40,9 +40,16 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
   from the brain (novelty floor + durability test).
 - Staging lives in `brain/.raw/transcript-ingest/` — git-versioned but excluded
   from gbrain import/embed, so raw working files never enter the brain DB.
-- Distilled notes are STAGED only. Filing into the real brain (personal / yei /
-  industry, via each RESOLVER) is manual show-and-confirm. The skill never
-  auto-writes to the embedded brain.
+- Two filing tracks (drain cron auto-runs `lib/file_distilled.py`): **personal**
+  SIGNAL auto-files to `brain/sessions/`, and a durable `## Reusable learning`
+  (tagged `learning: pitfall|pattern|architecture`) auto-promotes to a typed
+  `brain/learnings/` page at `confidence: 6`, deduped by `source_key` — no
+  confirm. **industry / yei / dup** stage in `brain/inbox/transcript-ingest/`
+  for manual RESOLVER filing (work-vault is off-limits). The personal brain is
+  kept current automatically; cross-domain entity filing stays human-gated.
+  (NOTE: Phases 4 / Anti-Patterns / Not-Yet-Wired below still describe the older
+  fully-manual model — pre-existing drift from the auto-drain cron, flagged for a
+  separate reconciliation pass.)
 
 ## Phases
 
