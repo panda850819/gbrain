@@ -23,6 +23,7 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | Fix broken citations in brain pages | `skills/citation-fixer/SKILL.md` |
 | "citation audit", "check citations", "fix citations" | `skills/citation-fixer/SKILL.md` (focused fix). For broader brain health, chain into `skills/maintain/SKILL.md` |
 | "Research", "track", "extract from email", "investor updates", "donations" | `skills/data-research/SKILL.md` |
+| "how many / 幾筆 / sum / average / trend", compute a value/aggregate/row-list over a known structured DB source (Postgres/DuckDB/SQLite) | `skills/data-query/SKILL.md` |
 | Share a brain page as a link | `skills/publish/SKILL.md` |
 | "validate frontmatter", "check frontmatter", "fix frontmatter", "frontmatter audit", "brain lint" | `skills/frontmatter-guard/SKILL.md` |
 | "what search mode", "is my cache hot", "tune my retrieval", "compare search modes", "clear search overrides" | `gbrain search modes/stats/tune` directly. See `skills/conventions/search-modes.md` |
@@ -60,7 +61,7 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | Daily briefing, "what's happening today" | `skills/briefing/SKILL.md` |
 | Cron scheduling, quiet hours, job staggering | `skills/cron-scheduler/SKILL.md` |
 | Save or load reports | `skills/reports/SKILL.md` |
-| "Create a skill", "improve this skill" | `skills/skill-creator/SKILL.md` |
+| "Create a GBrain skill", "improve this GBrain skill" | `skills/gbrain-skill-creator/SKILL.md` |
 | "Skillify this", "is this a skill?", "make this proper" | `skills/skillify/SKILL.md` |
 | "Compress my resolver", "AGENTS.md too large", "RESOLVER.md too big", "functional area dispatcher", "shrink routing table" | `skills/functional-area-resolver/SKILL.md` |
 | "Is gbrain healthy?", morning health check, skillpack-check | `skills/skillpack-check/SKILL.md` |

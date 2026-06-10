@@ -14,6 +14,7 @@ triggers:
   - "ingest my transcripts"
   - "distill my agent conversations"
   - "capture claude code / codex / hermes sessions"
+  - "capture my claude code / codex / hermes sessions"
   - "what did I work on across my AI tools"
   - "transcript ingest"
 tools:

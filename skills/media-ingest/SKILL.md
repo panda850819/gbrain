@@ -15,6 +15,7 @@ triggers:
   - "summarize this book"
   - "ingest it into my brain"
   - "what's in this screenshot"
+  - "ingest this repo as source"
   - "check out this repo"
 tools:
   - search

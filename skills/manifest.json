@@ -95,9 +95,9 @@
       "description": "Where new brain files go. Filing rules and directory conventions."
     },
     {
-      "name": "skill-creator",
-      "path": "skill-creator/SKILL.md",
-      "description": "Create new skills following the conformance standard with MECE validation."
+      "name": "gbrain-skill-creator",
+      "path": "gbrain-skill-creator/SKILL.md",
+      "description": "Create new GBrain skills following the conformance standard with MECE validation."
     },
     {
       "name": "daily-task-manager",
@@ -143,6 +143,11 @@
       "name": "data-research",
       "path": "data-research/SKILL.md",
       "description": "Structured data research: search, extract, archive, deduplicate, track. Parameterized YAML recipes for investor updates, donations, company metrics."
+    },
+    {
+      "name": "data-query",
+      "path": "data-query/SKILL.md",
+      "description": "NL over an existing structured DB (Postgres/DuckDB/SQLite): load brain semantic layer, draft SQL, dry-run gate, execute read-only, cache the NL->SQL method. Brain holds meaning, DB holds values."
     },
     {
       "name": "minion-orchestrator",

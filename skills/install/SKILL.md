@@ -1,3 +1,13 @@
+---
+name: install
+description: Deprecated GBrain install skill. Use the setup skill instead.
+triggers:
+  - "install gbrain"
+  - "setup gbrain"
+  - "gbrain install"
+mutating: false
+---
+
 # Install GBrain (Deprecated)
 
 This skill has been replaced by the **setup** skill. See `skills/setup/SKILL.md`.

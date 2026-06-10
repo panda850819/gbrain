@@ -8,6 +8,8 @@ description: |
   Auto-routes on ticker mentions like "NVTS 有什麼消息嗎"、"把這 5 檔的全名跟操盤人查一下補上"、
   "PLTR 補一下"、"2330 補近期新聞".
 triggers:
+  - "NVTS 有什麼消息"
+  - "PLTR 補一下"
   - "<TICKER> 有什麼消息嗎"
   - "<TICKER> 補一下"
   - "<TICKER> 是什麼"
@@ -37,6 +39,15 @@ writes_to:
 # Stock Enrich Skill
 
 > **Filing rule:** Read `skills/_brain-filing-rules.md` before creating any new page.
+
+## Contract
+
+This skill guarantees:
+
+- A canonical company page exists or is updated for every requested ticker.
+- The company page is cross-linked from the matching sector hub when the hub exists.
+- All tickers in a multi-ticker request are resolved before reporting completion.
+- Every factual claim is cited or explicitly marked `待確認`.
 
 ## When to Use
 
@@ -181,7 +192,7 @@ Wiki-link executive names to `people/<slug>.md` (e.g., `[[../people/alex-karp|Al
 - `gbrain add_link <company-slug> --to <hub-slug> --type "tagged_in"`
 - `gbrain add_timeline_entry <company-slug> "<today>: enriched via stock-enrich skill"` (one line, lightweight).
 
-## Anti-patterns
+## Anti-Patterns
 
 - **No invented executives or financials.** Every fact cited, or omitted with a "待確認" flag.
 - **No silent new sector hubs.** Pause and ask before opening one.
@@ -189,7 +200,7 @@ Wiki-link executive names to `people/<slug>.md` (e.g., `[[../people/alex-karp|Al
 - **No re-enrich without consent.** If `updated:` is within 7 days, ask Panda before re-running.
 - **No partial multi-ticker reports.** If the user asks about 5 tickers, finish all 5 before reporting.
 
-## Output
+## Output Format
 
 After all phases for all tickers:
 

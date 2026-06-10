@@ -1,11 +1,13 @@
 ---
-name: skill-creator
+name: gbrain-skill-creator
 version: 1.0.0
 description: |
-  Create new skills following the GBrain conformance standard. Generates SKILL.md
+  Create new GBrain skills following the GBrain conformance standard. Generates SKILL.md
   with frontmatter, Contract, Phases, Output Format, and Anti-Patterns. Checks
   MECE against existing skills. Updates manifest and resolver.
 triggers:
+  - "Create a GBrain skill"
+  - "improve this GBrain skill"
   - "create a skill"
   - "new skill"
   - "improve this skill"
@@ -20,7 +22,7 @@ mutating: true
 ## Contract
 
 This skill guarantees:
-- New skill follows conformance standard (frontmatter + required sections)
+- New GBrain skill follows conformance standard (frontmatter + required sections)
 - MECE check: no overlap with existing skills' triggers
 - Manifest.json updated
 - RESOLVER.md updated with routing entry
