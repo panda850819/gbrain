@@ -44,6 +44,7 @@ import {
 
 export const RRF_K = 60;
 const COMPILED_TRUTH_BOOST = 2.0;
+const DEFAULT_QUERY_EMBED_TIMEOUT_MS = 2500;
 const pendingCacheWrites = new Set<Promise<unknown>>();
 
 /**
@@ -92,6 +93,37 @@ function trackCacheWrite(promise: Promise<unknown>): void {
  */
 const BACKLINK_BOOST_COEF = 0.05;
 const DEBUG = process.env.GBRAIN_SEARCH_DEBUG === '1';
+
+function resolveQueryEmbedTimeoutMs(): number {
+  const raw = process.env.GBRAIN_QUERY_EMBED_TIMEOUT_MS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return DEFAULT_QUERY_EMBED_TIMEOUT_MS;
+}
+
+async function embedQueryForSearch(
+  query: string,
+  opts?: { embeddingModel?: string; dimensions?: number },
+): Promise<Float32Array> {
+  const timeoutMs = resolveQueryEmbedTimeoutMs();
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutMs > 0) {
+    timer = setTimeout(() => controller.abort(new Error(`query embedding timed out after ${timeoutMs}ms`)), timeoutMs);
+    timer.unref?.();
+  }
+  try {
+    return await embedQuery(query, {
+      ...opts,
+      abortSignal: controller.signal,
+      maxRetries: 0,
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * Apply backlink boost to a result list in place. Mutates each result's score
@@ -1063,7 +1095,7 @@ export async function hybridSearch(
       const embedOpts = resolvedCol.embeddingModel
         ? { embeddingModel: resolvedCol.embeddingModel, dimensions: resolvedCol.dimensions }
         : undefined;
-      const embeddings = await Promise.all(queries.map(q => embedQuery(q, embedOpts)));
+      const embeddings = await Promise.all(queries.map(q => embedQueryForSearch(q, embedOpts)));
       queryEmbedding = embeddings[0];
       const textLists = await Promise.all(
         embeddings.map(emb => engine.searchVector(emb, searchOpts)),
@@ -1470,7 +1502,7 @@ export async function hybridSearchCached(
       const providerProbeCached = resolvedColCached.embeddingModel || undefined;
       if (isAvailable('embedding', providerProbeCached)) {
         // v0.35.0.0+: query-side embedding (cache lookup path).
-        queryEmbedding = await embedQuery(query);
+        queryEmbedding = await embedQueryForSearch(query);
       } else {
         cacheStatus = 'disabled';
       }

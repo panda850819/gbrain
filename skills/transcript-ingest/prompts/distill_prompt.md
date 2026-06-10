@@ -47,3 +47,5 @@ Rules:
 
 Return EXACTLY one line, nothing else:
 `<KEY> | <SIGNAL|NOISE> | <domain> | <written path or "-"> | <one-clause why>`
+
+For SIGNAL, `<written path>` MUST be the file you just wrote at exactly `DISTILLED_DIR/<domain>/<KEY>.md`. Do not report existing brain/session/learning paths, summary targets, or related files. If that distilled file does not exist, you have not completed the task.

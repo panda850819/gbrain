@@ -15,6 +15,9 @@ import os
 import sys
 import glob
 import hashlib
+import tempfile
+import shutil
+import fcntl
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from normalize import normalize, to_text, stats
@@ -23,6 +26,7 @@ HOME = os.path.expanduser("~")
 STAGING = os.environ.get(
     "TI_STAGING", os.path.join(HOME, "site/knowledge/brain/.raw/transcript-ingest"))
 STATE = os.path.join(STAGING, "state.json")
+STATE_LOCK = STATE + ".lock"
 QUEUE = os.path.join(STAGING, "_queue")
 MANIFEST = os.path.join(STAGING, "_manifest.json")
 
@@ -74,8 +78,49 @@ def _is_disposable_artifact(text):
     return any(m in head for m in _DISPOSABLE_MARKERS)
 
 
+def locked_state():
+    os.makedirs(STAGING, exist_ok=True)
+    lock = open(STATE_LOCK, "a+")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    return lock
+
+
 def load_state():
-    return json.load(open(STATE)) if os.path.exists(STATE) else {}
+    if not os.path.exists(STATE):
+        return {}
+    raw = open(STATE).read()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        # Self-heal the observed adjacent-object corruption caused by overlapping
+        # writers: ...}\n}"claude__..." -> ...},\n"claude__..."
+        import re
+        repaired = re.sub(r'\n}\s*"(claude__|codex__|hermes__)', r',\n"\1', raw, count=1)
+        try:
+            obj = json.loads(repaired)
+        except Exception:
+            raise e
+        backup = STATE + ".corrupt-bak"
+        shutil.copy2(STATE, backup)
+        atomic_dump(obj, STATE)
+        return obj
+
+
+def atomic_dump(obj, path):
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=0)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def key_for(source, path):
@@ -84,6 +129,7 @@ def key_for(source, path):
 
 def main():
     os.makedirs(QUEUE, exist_ok=True)
+    lock = locked_state()
     state = load_state()
     counts = {"scanned": 0, "sidechain": 0, "meta": 0, "artifact": 0,
               "new": 0, "requeued": 0, "dedup": 0, "thin": 0, "empty": 0}
@@ -129,14 +175,16 @@ def main():
                         "source": source, "path": path, **st}
             counts["new" if not prev else "requeued"] += 1
 
-    json.dump(state, open(STATE, "w"), ensure_ascii=False, indent=0)
+    atomic_dump(state, STATE)
     # Manifest = everything still PENDING distill across all runs, not just
     # this run's new items, so re-running collect never drops a pending session.
     pending = [{"key": k, "source": v["source"], "turns": v["turns"],
                 "human_chars": v["human_chars"], "total_chars": v["total_chars"]}
                for k, v in state.items() if v.get("status") == "queued"]
     pending.sort(key=lambda m: m["human_chars"], reverse=True)
-    json.dump(pending, open(MANIFEST, "w"), ensure_ascii=False, indent=2)
+    atomic_dump(pending, MANIFEST)
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    lock.close()
 
     print("== collect ==")
     for k, v in counts.items():

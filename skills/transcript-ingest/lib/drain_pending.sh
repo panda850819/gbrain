@@ -6,13 +6,19 @@
 # alike). Claude Code is also auto-distilled instantly by its SessionEnd hook;
 # this cron is its backstop. Cheap headless model, capped, lock-guarded.
 set -u
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 PY=/usr/bin/python3
 SK="$HOME/gbrain/skills/transcript-ingest"
 STAGE="$HOME/site/knowledge/brain/.raw/transcript-ingest"
 LOG="$HOME/.gbrain/transcript-ingest-auto.log"
 LOCK="/tmp/transcript-ingest-drain.lock"
-CLAUDE="/Applications/cmux.app/Contents/Resources/bin/claude"
+# Prefer the self-contained native binary. The homebrew node cli.js (first on
+# the PATH this script exports) is stale and node-dependent, so it lags the
+# current version and breaks when node/node_modules shift — that killed this
+# cron intermittently. Native first, PATH claude next, cmux last.
+CLAUDE="$HOME/.local/bin/claude"
 [ -x "$CLAUDE" ] || CLAUDE="$(command -v claude 2>/dev/null)"
+[ -x "$CLAUDE" ] || CLAUDE="/Applications/cmux.app/Contents/Resources/bin/claude"
 MODEL="claude-haiku-4-5-20251001"
 SETTLE_MIN="${TI_SETTLE_MIN:-10}"
 CAP="${TI_DRAIN_CAP:-25}"
@@ -27,10 +33,12 @@ touch "$LOCK"
 "$PY" "$SK/lib/collect.py" >/dev/null 2>&1
 
 # Pending keys whose source jsonl is settled (mtime older than SETTLE_MIN), capped.
-keys=$("$PY" - "$STAGE" "$SETTLE_MIN" "$CAP" <<'PYEOF'
+keys=$("$PY" - "$STAGE" "$SETTLE_MIN" "$CAP" "$SK/lib" <<'PYEOF'
 import json, os, sys, time
-stage, settle_min, cap = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-state = json.load(open(os.path.join(stage, "state.json")))
+stage, settle_min, cap, libdir = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+sys.path.insert(0, libdir)
+from state_io import load_state
+state = load_state(os.path.join(stage, "state.json"))
 now = time.time()
 rows = []
 for k, v in state.items():
@@ -58,10 +66,14 @@ while IFS= read -r key; do
     qfile="$STAGE/_queue/$key.txt"
     [ -f "$qfile" ] || continue
     prompt="You are a transcript distill worker. Read $SK/prompts/distill_prompt.md and execute it with: SESSION_FILE=$qfile | GATE_PROMPT=$SK/prompts/gate_prompt.md | DISTILLED_DIR=$STAGE/_distilled | KEY=$key. Output ONLY the final one-line report."
-    report=$("$CLAUDE" -p "$prompt" --model "$MODEL" --permission-mode bypassPermissions 2>>"$LOG" | tail -1)
+    report=$("$CLAUDE" -p "$prompt" --model "$MODEL" --permission-mode bypassPermissions </dev/null 2>>"$LOG" | tail -1)
     echo "$(ts) [drain] $report" >>"$LOG"
-    [ -n "$report" ] && echo "$report" | "$PY" "$SK/lib/mark.py" >>"$LOG" 2>&1
-    n=$((n+1))
+    if echo "$report" | grep -q "|"; then
+        echo "$report" | "$PY" "$SK/lib/mark.py" >>"$LOG" 2>&1
+        n=$((n+1))
+    else
+        echo "$(ts) [drain] no valid report for $key" >>"$LOG"
+    fi
 done <<< "$keys"
 
 "$PY" "$SK/lib/file_distilled.py" >>"$LOG" 2>&1

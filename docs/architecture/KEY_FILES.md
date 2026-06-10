@@ -332,7 +332,7 @@ per-release `**vX.Y.Z:**` narration — CI enforces this
 - `skills/meeting-ingestion/SKILL.md` — Transcripts with attendee enrichment chaining
 - `skills/citation-fixer/SKILL.md` — Citation format auditing and fixing
 - `skills/repo-architecture/SKILL.md` — Filing rules by primary subject
-- `skills/skill-creator/SKILL.md` — Create conforming skills with MECE check
+- `skills/gbrain-skill-creator/SKILL.md` — Create conforming GBrain skills with MECE check
 - `skills/daily-task-manager/SKILL.md` — Task lifecycle with priority levels
 - `skills/daily-task-prep/SKILL.md` — Morning prep with calendar context
 - `skills/cross-modal-review/SKILL.md` — Quality gate via second model

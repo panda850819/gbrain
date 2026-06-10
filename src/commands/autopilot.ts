@@ -91,6 +91,17 @@ function logError(phase: string, e: unknown) {
   } catch { /* best-effort */ }
 }
 
+async function countQueuedAutopilotCycles(engine: BrainEngine): Promise<number> {
+  const rows = await engine.executeRaw<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM minion_jobs
+      WHERE name = 'autopilot-cycle'
+        AND queue = 'default'
+        AND status IN ('waiting', 'delayed', 'active', 'waiting-children')`,
+  );
+  return parseInt(rows[0]?.count ?? '0', 10) || 0;
+}
+
 /**
  * Resolve the gbrain CLI entrypoint for spawning the worker child.
  *
@@ -495,11 +506,11 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
   // before the queue piles up.
   const NO_WORKER_WARN_TICKS = 3;
   let noWorkerConsecutiveIdle = 0;
-  // v0.36+ T8: track time since last full cycle for the 60-min floor.
-  // Initialized to "long ago" so the first tick on a healthy brain still
-  // runs the full cycle (phase-coupling exercise) before settling into
-  // targeted-submit mode.
-  let lastFullCycleAt = 0;
+  // v0.36+ T8: track time since last full cycle for the 240-min floor.
+  // Initialize to now so daemon restarts do not immediately submit a heavy
+  // full cycle. Per-source `last_full_cycle_at` still gates dispatch in
+  // autopilot-fanout when the floor elapses.
+  let lastFullCycleAt = Date.now();
 
   while (!stopping) {
     const cycleStart = Date.now();
@@ -609,14 +620,14 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       //
       // New logic: compute the remediation plan (cheap; no full doctor
       // walk), then route to the right level of intervention:
-      //   - Score >= 95 + empty plan: full cycle every 60min (phase-
+      //   - Score >= 95 + empty plan: full cycle every 240min (phase-
       //     coupling exercise), otherwise sleep.
       //   - Small plan (<=3 steps, <5min): submit individual handlers.
       //   - Large plan or low score: full autopilot-cycle (the hammer).
       //
       // D10 cycle-lock invariant ensures targeted-submit and
       // autopilot-cycle can never run concurrently (both acquire
-      // gbrain-cycle), so the "60-min floor double-processes queued
+      // gbrain-cycle), so the "240-min floor double-processes queued
       // targeted jobs" failure mode is closed by the lock.
       //
       // v0.40 D17 layered on top: per-source freshness check fires BEFORE
@@ -728,62 +739,101 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
             `[autopilot] onboard checks failed (fail-open per A19): ${err instanceof Error ? err.message : String(err)}\n`,
           );
         }
-        const plan = computeRecommendations(health, ctx, extraRemediations).filter((r) => r.status === 'remediable');
-        const estTotal = plan.reduce((s, r) => s + r.est_seconds, 0);
+        let plan = computeRecommendations(health, ctx, extraRemediations).filter((r) => r.status === 'remediable');
 
-        // Track time since last full cycle for the 60-min floor.
-        const FULL_CYCLE_FLOOR_MIN = 60;
+        // Track time since last full cycle for the 240-min floor.
+        const FULL_CYCLE_FLOOR_MIN = 240;
         const minutesSinceLastFull = (Date.now() - lastFullCycleAt) / 60000;
+        const fullCycleFloorElapsed = minutesSinceLastFull >= FULL_CYCLE_FLOOR_MIN;
 
+        if (!fullCycleFloorElapsed) {
+          const before = plan.length;
+          plan = plan.filter((r) => !(r.job === 'extract' && r.id === 'extract.all'));
+          const skipped = before - plan.length;
+          if (skipped > 0) {
+            if (jsonMode) {
+              process.stderr.write(JSON.stringify({
+                event: 'skip_heavy_targeted_before_full_cycle_floor',
+                skipped,
+                floor_min: FULL_CYCLE_FLOOR_MIN,
+                minutes_since_last_full: Number(minutesSinceLastFull.toFixed(1)),
+              }) + '\n');
+            } else {
+              console.log(
+                `[dispatch] skip heavy targeted jobs before ${FULL_CYCLE_FLOOR_MIN}min floor: ` +
+                `${skipped} skipped, elapsed=${minutesSinceLastFull.toFixed(1)}min`,
+              );
+            }
+          }
+        }
+
+        const estTotal = plan.reduce((s, r) => s + r.est_seconds, 0);
+        const heavyPlanNeedsFullCycle = plan.length > 3 || estTotal >= 300 || score < 70;
         const shouldFullCycle =
-          (score >= 95 && plan.length === 0 && minutesSinceLastFull >= FULL_CYCLE_FLOOR_MIN) ||
-          plan.length > 3 ||
-          estTotal >= 300 ||
-          score < 70;
+          fullCycleFloorElapsed && ((score >= 95 && plan.length === 0) || heavyPlanNeedsFullCycle);
 
-        const shouldSleep = score >= 95 && plan.length === 0 && minutesSinceLastFull < FULL_CYCLE_FLOOR_MIN;
+        const shouldSleep = score >= 95 && plan.length === 0 && !fullCycleFloorElapsed;
 
         if (shouldSleep) {
           if (jsonMode) {
             process.stderr.write(JSON.stringify({ event: 'skip_healthy', score, plan_size: 0 }) + '\n');
           }
         } else if (shouldFullCycle) {
-          // v0.38: per-source fan-out replaces the single-job dispatch.
-          // dispatchPerSource enumerates sources via listAllSources
-          // ({ localPathOnly: true }), gates each on per-source
-          // `last_full_cycle_at` from sources.config JSONB, and fans out
-          // up to `fanoutMax` per tick (default 4 Postgres, 1 PGLite per
-          // codex P1-3). Fresh-install brains with no sources rows fall
-          // back to the legacy single autopilot-cycle so existing
-          // behavior is preserved.
-          const { dispatchPerSource, resolveFanoutMax } = await import('./autopilot-fanout.ts');
-          const fanoutMax = await resolveFanoutMax(engine);
-          const result = await dispatchPerSource(engine, queue, {
-            repoPath,
-            slot,
-            timeoutMs,
-            fanoutMax,
-            jsonMode,
-          });
-          if (result.dispatched.length > 0 || result.legacy_fallback) {
+          const queuedAutopilotCycles = await countQueuedAutopilotCycles(engine);
+          if (queuedAutopilotCycles > 0) {
+            if (jsonMode) {
+              process.stderr.write(JSON.stringify({
+                event: 'skip_autopilot_cycle_queued',
+                queued_autopilot_cycles: queuedAutopilotCycles,
+                score,
+                plan_size: plan.length,
+                est_total_seconds: estTotal,
+              }) + '\n');
+            } else {
+              console.log(
+                `[dispatch] skip autopilot-cycle: ${queuedAutopilotCycles} queued/active; ` +
+                `score=${score}, plan=${plan.length}, est=${estTotal}s`,
+              );
+            }
             lastFullCycleAt = Date.now();
-          }
-          if (jsonMode) {
-            process.stderr.write(JSON.stringify({
-              event: 'fanout_summary',
-              dispatched: result.dispatched,
-              skipped_fresh: result.skipped_fresh,
-              skipped_cap: result.skipped_cap,
-              legacy_fallback: result.legacy_fallback,
-              fanout_max: fanoutMax,
-              score,
-            }) + '\n');
-          } else if (!result.legacy_fallback) {
-            console.log(
-              `[dispatch] fanout: ${result.dispatched.length} dispatched, ` +
-              `${result.skipped_fresh.length} fresh, ${result.skipped_cap.length} capped ` +
-              `(score=${score}, max=${fanoutMax})`,
-            );
+          } else {
+            // v0.38: per-source fan-out replaces the single-job dispatch.
+            // dispatchPerSource enumerates sources via listAllSources
+            // ({ localPathOnly: true }), gates each on per-source
+            // `last_full_cycle_at` from sources.config JSONB, and fans out
+            // up to `fanoutMax` per tick (default 4 Postgres, 1 PGLite per
+            // codex P1-3). Fresh-install brains with no sources rows fall
+            // back to the legacy single autopilot-cycle so existing
+            // behavior is preserved.
+            const { dispatchPerSource, resolveFanoutMax } = await import('./autopilot-fanout.ts');
+            const fanoutMax = await resolveFanoutMax(engine);
+            const result = await dispatchPerSource(engine, queue, {
+              repoPath,
+              slot,
+              timeoutMs,
+              fanoutMax,
+              jsonMode,
+            });
+            if (result.dispatched.length > 0 || result.legacy_fallback) {
+              lastFullCycleAt = Date.now();
+            }
+            if (jsonMode) {
+              process.stderr.write(JSON.stringify({
+                event: 'fanout_summary',
+                dispatched: result.dispatched,
+                skipped_fresh: result.skipped_fresh,
+                skipped_cap: result.skipped_cap,
+                legacy_fallback: result.legacy_fallback,
+                fanout_max: fanoutMax,
+                score,
+              }) + '\n');
+            } else if (!result.legacy_fallback) {
+              console.log(
+                `[dispatch] fanout: ${result.dispatched.length} dispatched, ` +
+                `${result.skipped_fresh.length} fresh, ${result.skipped_cap.length} capped ` +
+                `(score=${score}, max=${fanoutMax})`,
+              );
+            }
           }
         } else {
           // Small targeted plan — submit individual handlers per step.

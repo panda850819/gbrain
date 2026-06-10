@@ -3,12 +3,16 @@
 # model, mark state, file into the brain. Invoked detached by the SessionEnd
 # hook so it never blocks session teardown. This is the auto /done.
 set -u
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 PY=/usr/bin/python3
 SK="$HOME/gbrain/skills/transcript-ingest"
 STAGE="$HOME/site/knowledge/brain/.raw/transcript-ingest"
 LOG="$HOME/.gbrain/transcript-ingest-auto.log"
-CLAUDE="/Applications/cmux.app/Contents/Resources/bin/claude"
+# Prefer the self-contained native binary; homebrew's node cli.js (first on the
+# PATH exported above) is stale + node-dependent and breaks intermittently.
+CLAUDE="$HOME/.local/bin/claude"
 [ -x "$CLAUDE" ] || CLAUDE="$(command -v claude 2>/dev/null)"
+[ -x "$CLAUDE" ] || CLAUDE="/Applications/cmux.app/Contents/Resources/bin/claude"
 MODEL="claude-haiku-4-5-20251001"
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -24,7 +28,7 @@ qfile="$STAGE/_queue/$key.txt"
 
 prompt="You are a transcript distill worker. Read $SK/prompts/distill_prompt.md and execute it with: SESSION_FILE=$qfile | GATE_PROMPT=$SK/prompts/gate_prompt.md | DISTILLED_DIR=$STAGE/_distilled | KEY=$key. Output ONLY the final one-line report."
 
-report=$("$CLAUDE" -p "$prompt" --model "$MODEL" --permission-mode bypassPermissions 2>>"$LOG" | tail -1)
+report=$("$CLAUDE" -p "$prompt" --model "$MODEL" --permission-mode bypassPermissions </dev/null 2>>"$LOG" | tail -1)
 echo "$(ts) $report" >>"$LOG"
 [ -n "$report" ] && echo "$report" | "$PY" "$SK/lib/mark.py" >>"$LOG" 2>&1
 # File the result: personal SIGNAL -> brain/sessions; industry/yei/dup -> inbox.

@@ -42,6 +42,15 @@ This skill guarantees:
 4. **Register with host scheduler.** OpenClaw cron, Railway cron, crontab, or process manager. **Each registered entry should execute via Minions, not `agentTurn`.** See `skills/conventions/cron-via-minions.md` for the rewrite pattern (PGLite uses `--follow`, Postgres uses fire-and-forget + `--idempotency-key` on the cycle slot). GBrain's v0.11.0 migration auto-rewrites entries for built-in handlers; host-specific handlers need a code-level registration per `docs/guides/plugin-handlers.md`.
 5. **Write thin prompt.** Job prompt is one line: "Read skills/{name}/SKILL.md and run it."
 
+## Updating existing jobs from prompts to inference
+
+When Panda rejects a reminder-style cron that asks him to fill in data, do not create a second job unless the schedule truly changes. Update the existing job in place:
+- List jobs, identify the current job ID, then `cronjob(action='update', job_id=...)`.
+- If the old job is `no_agent: true` with a tiny script that prints a question, clear `script` with `script: ""`, set `no_agent: false`, and give the job a self-contained prompt that infers the answer from available sessions, brain notes, and cron outputs.
+- Keep the same delivery target and schedule unless Panda asked to change timing.
+- Restrict toolsets to what the inference needs, e.g. `session_search`, `file`, `terminal` for an EOD summary.
+- Verify with `cronjob(action='list')` that `script` is gone, `no_agent` is false, and the next run is still scheduled.
+
 ## Idempotency Requirement
 
 Every cron job MUST be idempotent:
@@ -81,6 +90,22 @@ per-source cron pattern doesn't benefit from the parallelism that
 `gbrain doctor` surfaces the recommended line as a `sync_consolidation`
 check whenever it detects 2+ active sources. Paste-ready from there.
 
+## PangPang / Hermes cron noise audits
+
+When Panda asks to reduce Telegram noise or clean PangPang/Hermes cron, start with a read-only delivery-policy audit before changing schedules or deleting jobs. Classify every job as `Alert`, `Digest`, `Local only`, or `Retire candidate`; then convert maintenance/ingest success paths to `deliver: local` or true silent-on-success. For `no_agent=True`, any non-empty stdout is delivered verbatim, so wrappers must suppress normal skip/success strings, including `[SILENT]`. See `references/pangpang-cron-noise-audit.md` for the full checklist.
+
+## Domain-isolated cron ownership
+
+When a cron belongs to a separate operating domain, keep both execution and delivery inside that domain instead of letting Panda's local Hermes become the accidental scheduler:
+
+- Yei Brain cron belongs on the Linode VPS / Yei Hermes runtime, not Panda's local Hermes default profile.
+- First pause the local job to stop duplicate or misrouted alerts, then recreate or enable the job on the owning host/profile.
+- On the remote runtime, verify `HERMES_HOME`, `channel_directory.json`, `hermes cron status`, and the delivery target. Prefer explicit topic targets such as `telegram:<chat_id>:<thread_id>` over bare `telegram:<chat_id>`.
+- Convert local-time schedules carefully when the remote scheduler runs UTC, e.g. Taiwan 09:00 = `0 1 * * *` UTC.
+- For `no_agent` watchdogs, make remote freshness steps best-effort and non-spamming; emit stdout only for actionable alerts or watchdog failure.
+- If the job needs write access, push, PR creation, or private repo freshness, verify container-level GitHub auth/deploy keys before enabling agentic jobs.
+- See `references/domain-isolated-cron-migration.md` for the migration checklist and watchdog wrapper pattern.
+
 ## Anti-Patterns
 
 - Scheduling jobs at the same minute (:00 for everything)
@@ -92,3 +117,15 @@ check whenever it detects 2+ active sources. Paste-ready from there.
   `gbrain sync --all --parallel N --workers N` would replace them with
   one line that auto-picks-up future sources.
 - Using Claude Code, Codex, or local crontab as long-term schedulers for Panda-facing workflows that notify Telegram, write brain pages, or need agent judgment. Use Hermes cron for those; reserve launchd for long-lived services and Claude Code/Codex for one-shot worker tasks. See `references/cron-approval-continuation.md` for the continuation pattern when a scheduled job sends an approval message and Panda replies `ok`.
+
+## L1 local report loops
+
+When converting a repeated AI-infra workflow into a Loop Engineering pattern, start with an L1 local report loop before any auto-fix or Telegram delivery:
+
+- `deliver: local`
+- `no_agent: true`
+- `script:` is a wrapper script name only, no arguments
+- manual script run + state/report readback before claiming success
+- promote to assisted fixes only after stable reports and explicit Panda approval
+
+See `references/l1-local-report-loops.md` for the full checklist and Panda examples.

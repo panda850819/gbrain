@@ -14,6 +14,8 @@ import json
 import os
 import sys
 
+from state_io import load_state
+
 HOME = os.path.expanduser("~")
 STAGING = os.environ.get(
     "TI_STAGING", os.path.join(HOME, "site/knowledge/brain/.raw/transcript-ingest"))
@@ -27,7 +29,7 @@ def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 20
     # Derive pending straight from state (status==queued) so a freshly-marked
     # batch is reflected immediately — the manifest is only refreshed by collect.
-    state = json.load(open(STATE))
+    state = load_state(STATE)
     pending = [{"key": k, "source": v["source"], "human_chars": v["human_chars"],
                 "user_turns": v.get("user_turns", 0)}
                for k, v in state.items() if v.get("status") == "queued"]

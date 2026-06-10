@@ -37,7 +37,7 @@
  */
 
 import postgres from 'postgres';
-import { resolvePrepare, resolveSessionTimeouts, resolvePoolSize } from './db.ts';
+import { endPostgresPool, resolvePrepare, resolveSessionTimeouts, resolvePoolSize } from './db.ts';
 import { redactPgUrl } from './url-redact.ts';
 import { logConnectionEvent } from './connection-audit.ts';
 
@@ -401,12 +401,12 @@ export class ConnectionManager {
    */
   async disconnect(): Promise<void> {
     if (this._directPool) {
-      try { await this._directPool.end(); } catch { /* idempotent */ }
+      try { await endPostgresPool(this._directPool); } catch { /* idempotent */ }
       this._directPool = null;
       this._directInit = null;
     }
     if (this._readPool && !this._readPoolOwnedExternally) {
-      try { await this._readPool.end(); } catch { /* idempotent */ }
+      try { await endPostgresPool(this._readPool); } catch { /* idempotent */ }
       this._readPool = null;
     }
   }

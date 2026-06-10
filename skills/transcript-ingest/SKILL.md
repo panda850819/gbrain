@@ -85,6 +85,13 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
 - `_manifest.json` — pending work list, ranked
 - Per-worker report line: `<key> | SIGNAL|NOISE | <domain> | <path|-> | <why>`
 
+## Operational pitfalls
+
+- `state.json` has multiple writers (`collect.py`, `mark.py`, Claude `SessionEnd`, and launchd drain). Writers must hold a state lock and write JSON atomically via temp file + `os.replace`; direct `json.dump(open(..., "w"))` can leave adjacent-object corruption (`}\n}"claude__..."`) and stall every future collector.
+- In `drain_pending.sh`, commands inside `while read key` inherit the loop stdin. Claude Code must be invoked with `</dev/null`; otherwise the first Claude call consumes the remaining pending keys and the drain silently processes only one item per tick.
+- launchd PATH does not include Homebrew by default on this machine. Transcript drain scripts should export `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` before resolving `claude`, or they can emit `Error: claude not found in PATH` while still appearing to have processed the cap.
+- Distill workers sometimes report an existing brain/session path instead of writing `DISTILLED_DIR/<domain>/<KEY>.md`. `mark.py` must reject SIGNAL reports whose artifact path is missing, and the prompt must require the exact `_distilled` path before reporting SIGNAL.
+
 ## Anti-Patterns
 
 - Auto-filing INDUSTRY / YEI notes into entity pages without manual RESOLVER

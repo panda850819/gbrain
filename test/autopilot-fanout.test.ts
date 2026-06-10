@@ -3,7 +3,7 @@
  *
  * Pure-function coverage:
  *   - readLastFullCycleAt: JSONB roundtrip + nulls
- *   - isSourceStale: 60-min floor + never-cycled
+ *   - isSourceStale: 240-min floor + never-cycled
  *   - selectSourcesForDispatch: gate + cap + deterministic ordering
  *   - resolveFanoutMax: PGLite=1, Postgres=4, operator override
  *   - dispatchPerSource: fallback path + per-source idempotency + cap
@@ -59,18 +59,18 @@ describe('isSourceStale', () => {
     const past = new Date(NOW - 30 * 60_000).toISOString();
     expect(isSourceStale(src('a', past), NOW)).toBe(false);
   });
-  test('source cycled exactly at floor (60min) is stale (>=)', () => {
-    const past = new Date(NOW - 60 * 60_000).toISOString();
+  test('source cycled exactly at floor (240min) is stale (>=)', () => {
+    const past = new Date(NOW - 240 * 60_000).toISOString();
     expect(isSourceStale(src('a', past), NOW)).toBe(true);
   });
-  test('source cycled 2h ago is stale', () => {
+  test('source cycled 2h ago is fresh', () => {
     const past = new Date(NOW - 2 * 60 * 60_000).toISOString();
-    expect(isSourceStale(src('a', past), NOW)).toBe(true);
+    expect(isSourceStale(src('a', past), NOW)).toBe(false);
   });
   test('override floor (5 min) flips stale earlier', () => {
     const past = new Date(NOW - 6 * 60_000).toISOString();
     expect(isSourceStale(src('a', past), NOW, 5)).toBe(true);
-    expect(isSourceStale(src('a', past), NOW, 60)).toBe(false);
+    expect(isSourceStale(src('a', past), NOW, 240)).toBe(false);
   });
 });
 
@@ -81,7 +81,7 @@ describe('selectSourcesForDispatch', () => {
 
   test('only stale sources dispatched', () => {
     const result = selectSourcesForDispatch(
-      [fresh('a', 30), fresh('b', 90), src('c')],
+      [fresh('a', 30), fresh('b', 300), src('c')],
       10,
       NOW,
     );
@@ -92,12 +92,12 @@ describe('selectSourcesForDispatch', () => {
 
   test('never-cycled (NULL) sorts before timestamped', () => {
     const result = selectSourcesForDispatch(
-      [fresh('b', 90), src('a'), fresh('c', 120)],
+      [fresh('b', 300), src('a'), fresh('c', 360)],
       10,
       NOW,
     );
     // 'a' has no last_full_cycle_at → -Infinity → sorts first
-    // then 'c' (120min ago, older) before 'b' (90min ago, newer)
+    // then 'c' (360min ago, older) before 'b' (300min ago, newer)
     expect(result.dispatch.map(s => s.id)).toEqual(['a', 'c', 'b']);
   });
 

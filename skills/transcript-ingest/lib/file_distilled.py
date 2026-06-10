@@ -18,6 +18,8 @@ import re
 import glob
 import datetime
 
+from state_io import load_state
+
 HOME = os.path.expanduser("~")
 STAGING = os.environ.get(
     "TI_STAGING", os.path.join(HOME, "site/knowledge/brain/.raw/transcript-ingest"))
@@ -124,7 +126,7 @@ def promote_learning(body, key, d, slug, title, learned_keys):
 
 
 def main():
-    state = json.load(open(STATE)) if os.path.exists(STATE) else {}
+    state = load_state(STATE)
     filed_keys = index_filed_keys()
     learned_keys = index_learning_keys()
     existing = {}

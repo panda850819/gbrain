@@ -33,7 +33,7 @@
 import type { BrainEngine, SourceRow } from '../core/engine.ts';
 import type { MinionQueue } from '../core/minions/queue.ts';
 
-const FULL_CYCLE_FLOOR_MIN = 60;
+const FULL_CYCLE_FLOOR_MIN = 240;
 
 export interface FanoutOpts {
   repoPath: string;
@@ -101,7 +101,7 @@ export function readLastFullCycleAt(src: SourceRow): Date | null {
  *   2. The last full cycle is older than the freshness floor.
  *
  * `last_sync_at` is NOT consulted here — sync is one phase of a cycle, and
- * a brain may have fresh sync but stale extract/embed. The 60-min floor on
+ * a brain may have fresh sync but stale extract/embed. The 240-min floor on
  * full-cycle is the canonical freshness signal for autopilot dispatch.
  */
 export function isSourceStale(src: SourceRow, now = Date.now(), floorMin = FULL_CYCLE_FLOOR_MIN): boolean {

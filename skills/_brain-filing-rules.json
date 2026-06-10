@@ -46,6 +46,18 @@
       "description": "A long-form analysis of a specific topic."
     },
     {
+      "kind": "topic",
+      "directory": "topics/data/",
+      "examples": ["topics/data/<source>.md", "data-source semantic layers"],
+      "description": "Per-source semantic layer pages for data-query (table meanings, metrics, joins, NL->SQL examples). The brain holds query MEANING; the database holds VALUES."
+    },
+    {
+      "kind": "topic",
+      "directory": "topics/stocks/",
+      "examples": ["topics/stocks/<sector>-<tw|us>-2026.md", "sector hubs"],
+      "description": "Sector hub pages for stock-enrich: per-sector dossiers cross-linking companies/<ticker> pages with thesis and temporal context."
+    },
+    {
       "kind": "civic",
       "directory": "civic/",
       "examples": ["policy analysis", "government topics"],

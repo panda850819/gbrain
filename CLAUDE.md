@@ -236,7 +236,7 @@ organized by `skills/RESOLVER.md` (`AGENTS.md` is also accepted as of v0.19):
 briefing, migrate, setup, publish.
 
 **Brain skills (ported from an upstream agent fork):** signal-detector, brain-ops, idea-ingest, media-ingest,
-meeting-ingestion, citation-fixer, repo-architecture, skill-creator, daily-task-manager.
+meeting-ingestion, citation-fixer, repo-architecture, gbrain-skill-creator, daily-task-manager.
 
 **Operational + identity:** daily-task-prep, cross-modal-review, cron-scheduler, reports,
 testing, soul-audit, webhook-transforms, data-research, minion-orchestrator. As of

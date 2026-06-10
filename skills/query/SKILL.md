@@ -135,6 +135,19 @@ Combine with `gbrain query` for queries that need BOTH semantic similarity AND
 graph structure. Search results are ranked with a small backlink boost so well-
 connected entities surface higher.
 
+## Material Discovery for Writing / Reports
+
+When Panda asks whether the brain has existing material for a draft, weekly report, brand post, recap, or similar writing task, do not stop at one semantic query. Use a layered discovery pattern:
+
+1. Resolve the time window with a live date check if the request is relative (for example, "上個月" or "last week").
+2. Run broad semantic queries for the concept, but also search filenames and topic indexes for likely namespaces (`writing/`, `topics/marketing/`, `sessions/`, `briefs/`, `reflections/daily/`, `media/articles/`, `media/x/`).
+3. Read the most relevant source pages, not only snippets, before judging usefulness.
+4. Separate results by role in the future draft: positioning, voice/style, public-boundary, raw events/proof, templates/checklists.
+5. For report-writing answers, prioritize "what to reuse and how" over exhaustive citations. Give file paths and concrete recommended usage.
+6. Flag pages that are only candidate raw material versus pages already close to a draft.
+
+This pattern matters because brand/report material often lives in filenames, daily notes, session logs, or writing drafts that a single `gbrain query` may miss.
+
 ## Search Quality Awareness
 
 If search results seem off (wrong results, missing known pages, irrelevant hits):

@@ -14,6 +14,7 @@ let connectedUrl: string | null = null;
  * their own pool. Set `GBRAIN_POOL_SIZE=2` (or similar) before the command.
  */
 const DEFAULT_POOL_SIZE_FALLBACK = 10;
+const DEFAULT_POSTGRES_END_TIMEOUT_SECONDS = 2;
 
 /**
  * Supabase PgBouncer transaction-mode convention: port 6543 routes through
@@ -71,6 +72,19 @@ export function resolvePoolSize(explicit?: number): number {
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
   return DEFAULT_POOL_SIZE_FALLBACK;
+}
+
+export function resolvePostgresEndTimeoutSeconds(): number {
+  const raw = process.env.GBRAIN_POSTGRES_END_TIMEOUT_SECONDS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return DEFAULT_POSTGRES_END_TIMEOUT_SECONDS;
+}
+
+export async function endPostgresPool(pool: ReturnType<typeof postgres>): Promise<void> {
+  await pool.end({ timeout: resolvePostgresEndTimeoutSeconds() });
 }
 
 /**
@@ -237,7 +251,7 @@ export async function disconnect(): Promise<void> {
     logDbDisconnect('postgres', 'module');
   } catch { /* best-effort; never block disconnect on audit failure */ }
   if (sql) {
-    await sql.end();
+    await endPostgresPool(sql);
     sql = null;
     connectedUrl = null;
   }

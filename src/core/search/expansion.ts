@@ -16,6 +16,16 @@ import { countCJKAwareWords } from '../cjk.ts';
 const MAX_QUERIES = 3;
 const MIN_WORDS = 3;
 const MAX_QUERY_CHARS = 500;
+const DEFAULT_EXPANSION_TIMEOUT_MS = 2500;
+
+function resolveExpansionTimeoutMs(): number {
+  const raw = process.env.GBRAIN_QUERY_EXPANSION_TIMEOUT_MS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return DEFAULT_EXPANSION_TIMEOUT_MS;
+}
 
 /**
  * Defense-in-depth sanitization for user queries before they reach the LLM.
@@ -67,7 +77,19 @@ export async function expandQuery(query: string): Promise<string[]> {
     // gateway.expand() returns [original + expansions]. We feed it the sanitized
     // copy so the LLM channel is safe; the ORIGINAL query remains the first entry
     // for downstream search (gateway.expand includes the query it was called with).
-    const gatewayResults = await gatewayExpand(sanitized);
+    const timeoutMs = resolveExpansionTimeoutMs();
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => controller.abort(new Error(`query expansion timed out after ${timeoutMs}ms`)), timeoutMs);
+      timer.unref?.();
+    }
+    const gatewayResults = await gatewayExpand(sanitized, {
+      abortSignal: controller.signal,
+      maxRetries: 0,
+    }).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
 
     // Validate LLM-produced alternatives (everything after the first entry).
     const alternatives = gatewayResults.slice(1);

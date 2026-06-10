@@ -1503,12 +1503,14 @@ export async function embedOne(text: string): Promise<Float32Array> {
  */
 export async function embedQuery(
   text: string,
-  opts?: { embeddingModel?: string; dimensions?: number },
+  opts?: { embeddingModel?: string; dimensions?: number; abortSignal?: AbortSignal; maxRetries?: number },
 ): Promise<Float32Array> {
   const [v] = await embed([text], {
     inputType: 'query',
     embeddingModel: opts?.embeddingModel,
     dimensions: opts?.dimensions,
+    abortSignal: opts?.abortSignal,
+    maxRetries: opts?.maxRetries,
   });
   return v;
 }
@@ -2018,7 +2020,10 @@ const ExpansionSchema = z.object({
  * Returns the original query PLUS expansions. On failure, returns just the original.
  * Caller is responsible for sanitizing the query (prompt-injection boundary stays in expansion.ts).
  */
-export async function expand(query: string): Promise<string[]> {
+export async function expand(
+  query: string,
+  opts?: { abortSignal?: AbortSignal; maxRetries?: number },
+): Promise<string[]> {
   if (!query || !query.trim()) return [query];
   if (!isAvailable('expansion')) return [query];
 
@@ -2041,6 +2046,8 @@ export async function expand(query: string): Promise<string[]> {
         '',
         `Query: ${query}`,
       ].join('\n'),
+      ...(opts?.abortSignal !== undefined && { abortSignal: opts.abortSignal }),
+      ...(opts?.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
     });
 
     const expansions = result.object?.queries ?? [];

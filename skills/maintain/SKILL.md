@@ -81,6 +81,29 @@ Use the per-dimension walk below (Phase 2 onward) when:
 1. **Run health check.** Check gbrain health to get the dashboard.
 2. **Check each dimension:**
 
+### Interpreting mixed `gbrain health` vs `gbrain doctor`
+
+`gbrain health` and `gbrain doctor --json` can legitimately disagree in severity. Treat `gbrain health` as the quick operational score and `doctor` as the detailed gate. Example pattern: `gbrain health` may show `8/10` with 100% embeddings and clean frontmatter, while `doctor` is still `unhealthy` because cycle freshness, stale locks, or acknowledged/unacknowledged sync failures fail deeper checks.
+
+For this class of check, report both layers separately:
+- Quick health: score, pages/chunks, embedding coverage, frontmatter, sync freshness.
+- Doctor blockers: non-ok checks, especially `cycle_freshness`, `stale_locks`, `sync_failures`, `content_sanity_audit_recent`, `queue_health`, and `flagged_pages`.
+- Distinguish functional blockers from cost/config warnings. `subagent_capability` about prompt caching is a cost warning, not a broken brain.
+- When a clean write triggers a global health report, state clearly which findings are tied to the new page versus pre-existing Brain maintenance debt. A page can validate, capture, query, and link correctly while doctor still reports unrelated global warnings.
+- `cycle_freshness` can fail even when `gbrain autopilot --status` says installed or shows recent cycle logs. The check is about a completed full `gbrain dream` cycle record for the source, not merely autopilot installation or partial sub-phase activity.
+- For flagged pages, inspect details with `gbrain quarantine list --include-flagged --json`; `markup_heavy` means still searchable but retrieval should be cautious.
+- For small `embed_staleness`, size the backlog with `gbrain embed --stale --dry-run` before proposing refresh.
+- High orphan counts must be interpreted by type; generated leaf pages, notes, atoms, feed staging, and sidecar pages can inflate the number and should not all be treated as broken links.
+- See `references/doctor-warning-triage.md` for a compact warning-by-warning explanation template.
+
+If `sync_failures` are historical and the referenced files now validate clean, rerun sync with acknowledgement rather than editing clean files again. When embedding credentials are unavailable in the shell, use:
+
+```bash
+gbrain sync --skip-failed --no-embed
+```
+
+Then rerun `gbrain doctor --json` and confirm `sync_failures` moved to `ok`. Do not claim embeddings were refreshed when using `--no-embed`; only claim sync failures were acknowledged/import state was retried.
+
 ### Stale pages
 Pages where compiled_truth is older than the latest timeline entry. The assessment hasn't been updated to reflect recent evidence.
 - Check the health output for stale page count
@@ -281,6 +304,10 @@ after bulk imports or content edits that add new dated entries.
 
 ### Embedding freshness
 Chunks without embeddings, or chunks embedded with an old model.
+- Before running manual `gbrain embed`, `gbrain dream`, or any phase that embeds from a Hermes terminal subprocess, verify the key is present in that subprocess environment. Do not infer "key missing" from a bare command failure if the user's machine may store keys in Keychain or a wrapper.
+- Panda-specific runtime pitfall: `~/.gbrain/autopilot-run.sh` injects `OPENAI_API_KEY` from macOS Keychain, but ad-hoc Hermes terminal commands do not inherit that injection. For manual gbrain maintenance commands that need OpenAI embeddings, use the same pattern without printing the secret:
+  `OPENAI_API_KEY="$(security find-generic-password -a panda -s OPENAI_API_KEY -w 2>/dev/null)" gbrain ...`
+- If a long-running background `gbrain dream` was started without the key, fixing the environment later does not change that process. Its own `embed` phase can still fail and mark the cycle report `partial`; separately running `gbrain embed --stale` may make current health green, but it does not rewrite that earlier cycle report.
 - For large embedding refreshes (>1000 chunks), use nohup:
   `nohup gbrain embed refresh > /tmp/gbrain-embed.log 2>&1 &`
 - Then check progress: `tail -1 /tmp/gbrain-embed.log`
@@ -366,6 +393,17 @@ After maintenance runs, save a report:
 - Outstanding issues requiring user attention
 
 This creates an audit trail for brain health over time.
+
+### Cron / CLI report write discipline
+
+When running maintenance from a cron/no-MCP context with `gbrain` CLI + filesystem:
+
+1. Read the local filing resolver and runtime delta before writing the report.
+2. Prefer current CLI names over older skill prose: use `gbrain orphans --count|--json` for orphan scans, not obsolete `find_orphans` commands.
+3. For report pages with uppercase week labels like `YYYY-Www`, use the lowercase normalized slug for DB operations, e.g. `gbrain put reflections/weekly/2026-w23 < report.md`, because gbrain normalizes slugs to lowercase. Then ensure the requested filesystem path exists if the job contract requires exact casing, e.g. `reflections/weekly/2026-W23.md`.
+4. Verify both layers before final delivery: `gbrain get <normalized-slug>` succeeds and the report `.md` exists on disk. Only then create idempotency sentinels or report success.
+5. If embedding refresh cannot run because provider credentials are unavailable in the cron shell, do not claim embeddings are clean. Record the stale chunk count as an outstanding item and continue the maintenance report.
+6. If a side-effect partially succeeds, keep going but make the final report distinguish fixed items from DB/filesystem verification failures.
 
 ## Quality Rules
 

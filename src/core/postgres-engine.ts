@@ -251,7 +251,7 @@ export class PostgresEngine implements BrainEngine {
       this.connectionManager = null;
     }
     if (this._sql) {
-      await this._sql.end();
+      await db.endPostgresPool(this._sql);
       this._sql = null;
       // After this point, _connectionStyle stays 'instance' so a second
       // disconnect() is a no-op rather than falling through and clearing

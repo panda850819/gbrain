@@ -152,6 +152,12 @@ Rules:
 If a search result has `source_id: "gstack"` and `slug: "plans/foo"`,
 the citation is `[gstack:plans/foo]`. That's the whole rule.
 
+## GBrain maintenance cadence pitfall
+
+When diagnosing `gbrain watchdog`, `autopilot-cycle`, `stalled jobs`, or full extract pressure, first separate fast freshness work from heavy full-maintenance work. High-frequency ticks should run cheap sync/changed-only/embed catch-up jobs; full extract/full cycle belongs on a low-frequency lane, typically 4-12h or overnight. If the full cycle runtime is longer than the enqueue interval, the queue will create backlog and lease churn even when the worker is not truly dead.
+
+Reference: `references/gbrain-autopilot-cadence.md`.
+
 ## Anti-Patterns
 
 - Answering questions about people/companies without checking the brain first
@@ -160,6 +166,10 @@ the citation is `[gstack:plans/foo]`. That's the whole rule.
 - Blocking the response to do enrichment
 - Overwriting user's direct statements with lower-authority sources
 - Creating brain pages for non-notable entities
+
+## Pitfall: one-off gbrain CLI env may differ from autopilot
+
+Hermes non-interactive tool shells may not inherit the same API-key environment as `gbrain autopilot`. If `gbrain embed`, `gbrain dream`, or provider probes report a missing API key, do not conclude the key is absent. Check whether `~/.gbrain/autopilot-run.sh` injects the key from macOS Keychain, then mirror that command-local injection for the one-off command. Verify with `gbrain health` / `gbrain doctor` after the command. Capture the fix pattern, not the transient missing-key state.
 
 ## Tools Used
 
