@@ -12,6 +12,7 @@ import {
   recordSyncFailures,
   unacknowledgedSyncFailures,
   acknowledgeSyncFailures,
+  resolveMissingSyncFailures,
   formatCodeBreakdown,
 } from '../core/sync.ts';
 import { estimateTokens, CHUNKER_VERSION } from '../core/chunkers/code.ts';
@@ -320,6 +321,25 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       ? `Source "${opts.sourceId}" has no local_path. Run: gbrain sources add ${opts.sourceId} --path <path>`
       : `No repo path specified. Use --repo or run gbrain init with --repo first.`;
     throw new Error(hint);
+  }
+
+  if (opts.retryFailed) {
+    // Legacy failure rows (recorded before the repo stamp existed) carry no
+    // source attribution; only auto-resolve them when this brain has at most
+    // one registered source, so a multi-source sync can't clear another
+    // source's records.
+    let resolveUnattributed = false;
+    try {
+      const rows = await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM sources', []);
+      resolveUnattributed = (rows[0]?.n ?? 0) <= 1;
+    } catch { /* sources table unavailable: stay conservative */ }
+    const resolved = resolveMissingSyncFailures(repoPath, { resolveUnattributed });
+    if (resolved.count > 0) {
+      console.log(
+        `Resolved ${resolved.count} previously-failed file(s) no longer present in the source tree:\n` +
+        `${formatCodeBreakdown(resolved.summary)}`,
+      );
+    }
   }
 
   // v0.28: source-aware re-clone branch. When the source has a remote_url
@@ -787,7 +807,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // the failed files. Escape hatches: --skip-failed acknowledges the
   // current set, --retry-failed re-parses before running the normal sync.
   if (failedFiles.length > 0) {
-    recordSyncFailures(failedFiles, headCommit);
+    recordSyncFailures(failedFiles, headCommit, repoPath);
     // Emit structured summary grouped by error code so the operator
     // can see *why* files failed, not just how many.
     const codeBreakdown = formatCodeBreakdown(failedFiles);
@@ -1001,7 +1021,7 @@ async function performFullSync(
   // performFullSync is called on first-sync + force-full paths where
   // the sync module owns the last_commit write. Respect the same gate.
   if (result.failures.length > 0) {
-    recordSyncFailures(result.failures, headCommit);
+    recordSyncFailures(result.failures, headCommit, repoPath);
     const codeBreakdown = formatCodeBreakdown(result.failures);
     if (!opts.skipFailed) {
       console.error(
