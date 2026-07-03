@@ -17,25 +17,25 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-// Point HOME at a tmpdir so we don't stomp the real ~/.gbrain/sync-failures.jsonl
+// Point GBRAIN_HOME at a tmpdir so we don't stomp the real ~/.gbrain/sync-failures.jsonl
 let tmpHome: string;
-const originalHome = process.env.HOME;
+const originalGbrainHome = process.env.GBRAIN_HOME;
 
 beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-sync-failures-'));
-  process.env.HOME = tmpHome;
+  process.env.GBRAIN_HOME = tmpHome;
   // Belt-and-suspenders: explicitly clear the jsonl at the resolved path.
   const { syncFailuresPath } = await import('../src/core/sync.ts');
   try { rmSync(syncFailuresPath(), { force: true }); } catch { /* none */ }
 });
 
 afterEach(() => {
-  if (originalHome) process.env.HOME = originalHome;
-  else delete process.env.HOME;
+  if (originalGbrainHome !== undefined) process.env.GBRAIN_HOME = originalGbrainHome;
+  else delete process.env.GBRAIN_HOME;
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
@@ -105,6 +105,55 @@ describe('Bug 9 — sync-failures JSONL helpers', () => {
     expect(unacked[0].path).toBe('b.md');
   });
 
+  test('resolveMissingSyncFailures marks deleted failed files resolved', async () => {
+    const {
+      recordSyncFailures,
+      resolveMissingSyncFailures,
+      unresolvedSyncFailures,
+      loadSyncFailures,
+    } = await import('../src/core/sync.ts');
+    const repoPath = join(tmpHome, 'repo');
+    mkdirSync(join(repoPath, 'notes'), { recursive: true });
+    writeFileSync(join(repoPath, 'notes', 'still-bad.md'), '---\nslug: still-bad\n---\n');
+
+    recordSyncFailures([
+      { path: 'notes/bad.md', error: 'Frontmatter slug "bad" does not match path-derived slug "notes/bad"' },
+      { path: 'notes/still-bad.md', error: 'YAML parse failed: bad colon' },
+    ], 'commit1');
+
+    const result = resolveMissingSyncFailures(repoPath);
+    expect(result.count).toBe(1);
+    expect(result.summary).toEqual([{ code: 'SLUG_MISMATCH', count: 1 }]);
+
+    const unresolved = unresolvedSyncFailures();
+    expect(unresolved).toHaveLength(1);
+    expect(unresolved[0].path).toBe('notes/still-bad.md');
+
+    const resolved = loadSyncFailures().find(f => f.path === 'notes/bad.md');
+    expect(resolved?.resolved).toBe(true);
+    expect(resolved?.resolution).toBe('missing_file');
+    expect(typeof resolved?.resolved_at).toBe('string');
+  });
+
+  test('unresolvedSyncFailures excludes legacy acknowledged rows', async () => {
+    const { syncFailuresPath, unresolvedSyncFailures } = await import('../src/core/sync.ts');
+    const { dirname } = await import('path');
+    mkdirSync(dirname(syncFailuresPath()), { recursive: true });
+    writeFileSync(
+      syncFailuresPath(),
+      JSON.stringify({
+        path: 'notes/bad.md',
+        error: 'Frontmatter slug "bad" does not match path-derived slug "notes/bad"',
+        code: 'SLUG_MISMATCH',
+        commit: 'old',
+        ts: '2026-01-01T00:00:00Z',
+        acknowledged: true,
+      }) + '\n',
+    );
+
+    expect(unresolvedSyncFailures()).toEqual([]);
+  });
+
   test('loadSyncFailures returns [] when file is missing', async () => {
     const { loadSyncFailures } = await import('../src/core/sync.ts');
     expect(loadSyncFailures()).toEqual([]);
@@ -126,8 +175,9 @@ describe('Bug 9 — doctor surfaces sync failures', () => {
   test('doctor source contains sync_failures check', async () => {
     const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
     expect(source).toContain('sync_failures');
-    expect(source).toContain('unacknowledgedSyncFailures');
+    expect(source).toContain('unresolvedSyncFailures');
     expect(source).toContain("'gbrain sync --skip-failed'");
+    expect(source).not.toContain('acknowledged_at) unacked++');
   });
 });
 
@@ -167,6 +217,11 @@ describe('Bug 9 — sync.ts CLI flag wiring', () => {
     const result = acknowledgeSyncFailures();
     expect(result.count).toBe(2);
     expect(unacknowledgedSyncFailures().length).toBe(0);
+  });
+
+  test('performSync resolves missing failed files when --retry-failed is set', async () => {
+    const source = await Bun.file(new URL('../src/commands/sync.ts', import.meta.url)).text();
+    expect(source).toMatch(/if \(opts\.retryFailed\) \{[\s\S]*?resolveMissingSyncFailures\(repoPath\)/);
   });
 
   test('performSync gates sync.last_commit on failedFiles.length', async () => {

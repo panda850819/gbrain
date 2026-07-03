@@ -245,19 +245,8 @@ export async function doctorReportRemote(engine: BrainEngine): Promise<DoctorRep
   // 4. Sync failures (file-plane state, not in-DB; see src/core/sync.ts).
   // Read the JSONL file directly at the canonical path; cheap and engine-agnostic.
   try {
-    const { readFileSync, existsSync } = await import('fs');
-    const { gbrainPath } = await import('../core/config.ts');
-    const path = gbrainPath('sync-failures.jsonl');
-    let unacked = 0;
-    if (existsSync(path)) {
-      const lines = readFileSync(path, 'utf-8').split('\n').filter(l => l.trim());
-      for (const line of lines) {
-        try {
-          const entry = JSON.parse(line) as { acknowledged_at?: string | null };
-          if (!entry.acknowledged_at) unacked++;
-        } catch { /* skip malformed line */ }
-      }
-    }
+    const { unresolvedSyncFailures } = await import('../core/sync.ts');
+    const unacked = unresolvedSyncFailures().length;
     checks.push({
       name: 'sync_failures',
       status: unacked === 0 ? 'ok' : 'warn',
@@ -619,8 +608,8 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
   // Without this doctor check, users see "sync blocked" and have no
   // surface showing which files to fix.
   try {
-    const { unacknowledgedSyncFailures, loadSyncFailures, summarizeFailuresByCode } = await import('../core/sync.ts');
-    const unacked = unacknowledgedSyncFailures();
+    const { unresolvedSyncFailures, loadSyncFailures, summarizeFailuresByCode } = await import('../core/sync.ts');
+    const unacked = unresolvedSyncFailures();
     const all = loadSyncFailures();
     if (unacked.length > 0) {
       const codeSummary = summarizeFailuresByCode(unacked);

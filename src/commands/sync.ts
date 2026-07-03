@@ -12,6 +12,7 @@ import {
   recordSyncFailures,
   unacknowledgedSyncFailures,
   acknowledgeSyncFailures,
+  resolveMissingSyncFailures,
   formatCodeBreakdown,
 } from '../core/sync.ts';
 import { estimateTokens, CHUNKER_VERSION } from '../core/chunkers/code.ts';
@@ -320,6 +321,16 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       ? `Source "${opts.sourceId}" has no local_path. Run: gbrain sources add ${opts.sourceId} --path <path>`
       : `No repo path specified. Use --repo or run gbrain init with --repo first.`;
     throw new Error(hint);
+  }
+
+  if (opts.retryFailed) {
+    const resolved = resolveMissingSyncFailures(repoPath);
+    if (resolved.count > 0) {
+      console.log(
+        `Resolved ${resolved.count} previously-failed file(s) no longer present in the source tree:\n` +
+        `${formatCodeBreakdown(resolved.summary)}`,
+      );
+    }
   }
 
   // v0.28: source-aware re-clone branch. When the source has a remote_url

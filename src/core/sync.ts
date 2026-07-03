@@ -343,7 +343,7 @@ export function resolveSlugForPath(filePath: string, repoPrefix?: string): strin
 //      repos with many broken files aren't permanently stuck.
 
 import { existsSync as _existsSync, readFileSync as _readFileSync, appendFileSync as _appendFileSync, mkdirSync as _mkdirSync } from 'fs';
-import { join as _joinPath } from 'path';
+import { isAbsolute as _isAbsolutePath, join as _joinPath, normalize as _normalizePath } from 'path';
 import { gbrainPath as _gbrainPath } from './config.ts';
 import { createHash as _createHash } from 'crypto';
 
@@ -357,6 +357,9 @@ export interface SyncFailure {
   ts: string;
   acknowledged?: boolean;
   acknowledged_at?: string;
+  resolved?: boolean;
+  resolved_at?: string;
+  resolution?: 'missing_file';
 }
 
 /**
@@ -561,7 +564,61 @@ export function acknowledgeSyncFailures(): AcknowledgeResult {
   };
 }
 
-/** Return only unacknowledged failures. */
+function _isAcknowledgedFailure(f: SyncFailure): boolean {
+  return f.acknowledged === true || Boolean(f.acknowledged_at);
+}
+
+function _isResolvedFailure(f: SyncFailure): boolean {
+  return f.resolved === true || Boolean(f.resolved_at);
+}
+
+function _isRepoRelativeFailurePath(path: string): boolean {
+  if (!path || path.startsWith('<') || path.includes('\0') || _isAbsolutePath(path)) return false;
+  const normalized = _normalizePath(path).replace(/\\/g, '/');
+  return normalized !== '..' && !normalized.startsWith('../') && !normalized.includes('/../');
+}
+
+/** Return failures that still need user action. */
+export function unresolvedSyncFailures(): SyncFailure[] {
+  return loadSyncFailures().filter(f => !_isAcknowledgedFailure(f) && !_isResolvedFailure(f));
+}
+
+/** Backward-compatible name used by older callers. */
 export function unacknowledgedSyncFailures(): SyncFailure[] {
-  return loadSyncFailures().filter(f => !f.acknowledged);
+  return unresolvedSyncFailures();
+}
+
+/**
+ * Mark unresolved failures as resolved when their source file is no longer
+ * present in the repo. Used by `gbrain sync --retry-failed`: deletion makes a
+ * recorded parse/slug failure moot, so it should stop blocking doctor.
+ */
+export function resolveMissingSyncFailures(repoPath: string): AcknowledgeResult {
+  const entries = loadSyncFailures();
+  if (entries.length === 0) return { count: 0, summary: [] };
+  const now = new Date().toISOString();
+  let changed = 0;
+  const newlyResolved: SyncFailure[] = [];
+  const updated = entries.map(e => {
+    if (_isAcknowledgedFailure(e) || _isResolvedFailure(e) || !_isRepoRelativeFailurePath(e.path)) return e;
+    if (_existsSync(_joinPath(repoPath, e.path))) return e;
+    changed++;
+    const resolved = {
+      ...e,
+      code: e.code ?? classifyErrorCode(e.error),
+      resolved: true,
+      resolved_at: now,
+      resolution: 'missing_file' as const,
+    };
+    newlyResolved.push(resolved);
+    return resolved;
+  });
+  if (changed === 0) return { count: 0, summary: [] };
+  _mkdirSync(_failuresDir(), { recursive: true });
+  const fd = require('fs').writeFileSync;
+  fd(syncFailuresPath(), updated.map(e => JSON.stringify(e)).join('\n') + '\n');
+  return {
+    count: changed,
+    summary: summarizeFailuresByCode(newlyResolved),
+  };
 }
