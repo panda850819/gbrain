@@ -4,8 +4,8 @@
 Usage: echo "<key>|<SIGNAL|NOISE>|<domain>" | python mark.py
        (one verdict per line, from distill workers' report lines)
 
-A done session keeps its sha; if the source jsonl later GROWS, collect.py sees
-a new sha and re-queues it (status flips back to queued) for re-distill.
+A done session keeps its verdict/domain; if the source jsonl later GROWS,
+collect.py records needs_update without re-queueing it as a fresh distill.
 Override staging with env TI_STAGING.
 """
 import json

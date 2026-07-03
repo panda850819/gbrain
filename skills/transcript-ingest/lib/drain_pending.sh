@@ -34,26 +34,12 @@ touch "$LOCK"
 
 # Pending keys whose source jsonl is settled (mtime older than SETTLE_MIN), capped.
 keys=$("$PY" - "$STAGE" "$SETTLE_MIN" "$CAP" "$SK/lib" <<'PYEOF'
-import json, os, sys, time
+import os, sys
 stage, settle_min, cap, libdir = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 sys.path.insert(0, libdir)
-from state_io import load_state
+from state_io import load_state, settled_queued_keys
 state = load_state(os.path.join(stage, "state.json"))
-now = time.time()
-rows = []
-for k, v in state.items():
-    if v.get("status") != "queued":
-        continue
-    p = v.get("path", "")
-    try:
-        age = now - os.path.getmtime(p)
-    except OSError:
-        age = 1e9  # source gone -> treat as settled
-    if age < settle_min * 60:
-        continue  # still active, let it settle
-    rows.append((v.get("user_turns", 0) * 2000 + v.get("human_chars", 0), k))
-rows.sort(reverse=True)
-for _, k in rows[:cap]:
+for k in settled_queued_keys(state, settle_min, cap):
     print(k)
 PYEOF
 )

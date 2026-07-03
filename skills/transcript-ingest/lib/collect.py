@@ -4,7 +4,7 @@
 Deterministic + zero LLM. Three cheap filters BEFORE the LLM gate:
   1. dedup   — skip sessions already processed (key = source+id, content sha)
   2. thin    — skip sessions with too little human text (pure tool/noise)
-  3. growth  — re-queue a session only if its content hash changed
+  3. growth  — queue changed sessions only until they have been filed
 
 Staging (queue + state + distilled) lives in the brain repo under .raw/, which
 gbrain import/embed skips, so raw working files never pollute the brain DB.
@@ -88,7 +88,8 @@ def locked_state():
 def load_state():
     if not os.path.exists(STATE):
         return {}
-    raw = open(STATE).read()
+    with open(STATE) as f:
+        raw = f.read()
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
@@ -123,6 +124,13 @@ def atomic_dump(obj, path):
             pass
 
 
+def _remove_queue_file(qfile):
+    try:
+        os.remove(qfile)
+    except FileNotFoundError:
+        pass
+
+
 def key_for(source, path):
     return f"{source}__{os.path.basename(path)[:-6]}"  # strip .jsonl
 
@@ -132,7 +140,8 @@ def main():
     lock = locked_state()
     state = load_state()
     counts = {"scanned": 0, "sidechain": 0, "meta": 0, "artifact": 0,
-              "new": 0, "requeued": 0, "dedup": 0, "thin": 0, "empty": 0}
+              "new": 0, "requeued": 0, "updated_done": 0, "dedup": 0,
+              "thin": 0, "empty": 0}
 
     for source, pat in SOURCES:
         for path in glob.glob(pat, recursive=True):
@@ -168,9 +177,24 @@ def main():
                 # disk even when deduped (e.g. after a staging move that copied
                 # state.json but not _queue/). Regenerate if missing.
                 if prev.get("status") == "queued" and not os.path.exists(qfile):
-                    open(qfile, "w").write(text)
+                    with open(qfile, "w") as f:
+                        f.write(text)
+                elif prev.get("status") == "done":
+                    _remove_queue_file(qfile)
                 continue
-            open(qfile, "w").write(text)
+            if prev and prev.get("status") == "done":
+                updated = dict(prev)
+                if not updated.get("needs_update"):
+                    updated["needs_update_from_sha"] = prev.get("sha")
+                updated.update({"sha": sha, "status": "done",
+                                "source": source, "path": path, **st,
+                                "needs_update": True})
+                state[k] = updated
+                _remove_queue_file(qfile)
+                counts["updated_done"] += 1
+                continue
+            with open(qfile, "w") as f:
+                f.write(text)
             state[k] = {"sha": sha, "status": "queued",
                         "source": source, "path": path, **st}
             counts["new" if not prev else "requeued"] += 1

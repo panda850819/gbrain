@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 
 
 def load_state(path):
@@ -25,7 +26,8 @@ def load_state(path):
     still does not parse."""
     if not os.path.exists(path):
         return {}
-    raw = open(path).read()
+    with open(path) as f:
+        raw = f.read()
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
@@ -55,3 +57,23 @@ def atomic_dump(obj, path):
             os.unlink(tmp)
         except FileNotFoundError:
             pass
+
+
+def settled_queued_keys(state, settle_min, cap, now=None, getmtime=os.path.getmtime):
+    """Return queued keys whose source transcript has settled, in drain priority order."""
+    if now is None:
+        now = time.time()
+    rows = []
+    for k, v in state.items():
+        if v.get("status") != "queued":
+            continue
+        p = v.get("path", "")
+        try:
+            age = now - getmtime(p)
+        except OSError:
+            age = 1e9  # source gone -> treat as settled
+        if age < settle_min * 60:
+            continue
+        rows.append((v.get("user_turns", 0) * 2000 + v.get("human_chars", 0), k))
+    rows.sort(reverse=True)
+    return [k for _, k in rows[:cap]]
