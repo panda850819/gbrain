@@ -545,6 +545,28 @@ describe('extractFrontmatterLinks — field-map coverage', () => {
     });
   });
 
+  test('source_slug creates source → atom edge without resolver lookup', async () => {
+    const blockingResolver: SlugResolver = {
+      async resolve() {
+        throw new Error('source_slug should not use resolver');
+      },
+    };
+    const { candidates } = await extractFrontmatterLinks(
+      'atoms/source-page-a1', 'concept' as never,
+      { source_slug: 'reflections/daily/2026-07-03' },
+      blockingResolver,
+    );
+    expect(candidates).toEqual([{
+      fromSlug: 'reflections/daily/2026-07-03',
+      targetSlug: 'atoms/source-page-a1',
+      linkType: 'source',
+      context: 'atom-extraction: source_slug',
+      linkSource: 'frontmatter',
+      originSlug: 'atoms/source-page-a1',
+      originField: 'source_slug',
+    }]);
+  });
+
   test('person.companies (array alias) → multiple works_at edges', async () => {
     const { candidates } = await extractFrontmatterLinks(
       'people/pedro', 'person' as never, { companies: ['Stripe', 'Brex'] }, resolver,
@@ -828,4 +850,3 @@ describe("v0.18.0 migration v22 — links_resolution_type", () => {
     expect(v22!.sql).toContain("unqualified");
   });
 });
-

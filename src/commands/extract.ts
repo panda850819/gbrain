@@ -23,7 +23,7 @@ import type { PageType } from '../core/types.ts';
 import { parseMarkdown } from '../core/markdown.ts';
 import {
   extractPageLinks, parseTimelineEntries, inferLinkType, makeResolver,
-  extractFrontmatterLinks,
+  extractFrontmatterLinks, extractSourceSlugLink,
   type UnresolvedFrontmatterRef,
 } from '../core/link-extraction.ts';
 import { createProgress } from '../core/progress.ts';
@@ -44,6 +44,9 @@ export interface ExtractedLink {
   to_slug: string;
   link_type: string;
   context: string;
+  link_source?: string;
+  origin_slug?: string;
+  origin_field?: string;
 }
 
 export interface ExtractedTimelineEntry {
@@ -58,6 +61,13 @@ interface ExtractResult {
   links_created: number;
   timeline_entries_created: number;
   pages_processed: number;
+}
+
+export interface AtomSourceBackfillResult {
+  created: number;
+  pages_processed: number;
+  last_slug: string | null;
+  has_more: boolean;
 }
 
 // --- Shared walker ---
@@ -213,6 +223,19 @@ export async function extractLinksFromFile(
     }
   }
 
+  const sourceSlugLink = opts?.includeFrontmatter ? null : extractSourceSlugLink(slug, fm);
+  if (sourceSlugLink?.fromSlug && allSlugs.has(sourceSlugLink.fromSlug) && allSlugs.has(sourceSlugLink.targetSlug)) {
+    links.push({
+      from_slug: sourceSlugLink.fromSlug,
+      to_slug: sourceSlugLink.targetSlug,
+      link_type: sourceSlugLink.linkType,
+      context: sourceSlugLink.context,
+      link_source: sourceSlugLink.linkSource,
+      origin_slug: sourceSlugLink.originSlug,
+      origin_field: sourceSlugLink.originField,
+    });
+  }
+
   if (opts?.includeFrontmatter) {
     // Synthetic sync-ish resolver: only does step 1 (already a slug) and
     // step 2 (dir-hint + slugify), backed by the Set of all known slugs.
@@ -248,11 +271,57 @@ export async function extractLinksFromFile(
         to_slug: c.targetSlug,
         link_type: c.linkType,
         context: c.context,
+        link_source: c.linkSource,
+        origin_slug: c.originSlug,
+        origin_field: c.originField,
       });
     }
   }
 
   return links;
+}
+
+export async function backfillAtomSourceLinks(
+  engine: BrainEngine,
+  opts: { sourceId?: string; afterSlug?: string; limit?: number; dryRun?: boolean } = {},
+): Promise<AtomSourceBackfillResult> {
+  const sourceOpts = opts.sourceId ? { sourceId: opts.sourceId } : {};
+  const linkOpts = opts.sourceId
+    ? { from_source_id: opts.sourceId, to_source_id: opts.sourceId, origin_source_id: opts.sourceId }
+    : {};
+  const allSlugs = await engine.getAllSlugs(sourceOpts);
+  const slugList = Array.from(allSlugs).sort();
+  const startIdx = opts.afterSlug ? slugList.findIndex(s => s > opts.afterSlug!) : 0;
+  const start = startIdx < 0 ? slugList.length : startIdx;
+  const limit = Math.max(1, Math.min(1000, Math.floor(opts.limit ?? 100)));
+  const batch: LinkBatchInput[] = [];
+  let pagesProcessed = 0;
+  let lastSlug: string | null = null;
+
+  for (let i = start; i < slugList.length && pagesProcessed < limit; i++) {
+    const slug = slugList[i];
+    lastSlug = slug;
+    pagesProcessed++;
+    const page = await engine.getPage(slug, sourceOpts);
+    if (!page) continue;
+    const sourceSlugLink = extractSourceSlugLink(slug, page.frontmatter ?? {});
+    if (!sourceSlugLink?.fromSlug) continue;
+    if (!allSlugs.has(sourceSlugLink.fromSlug) || !allSlugs.has(sourceSlugLink.targetSlug)) continue;
+    batch.push({
+      from_slug: sourceSlugLink.fromSlug,
+      to_slug: sourceSlugLink.targetSlug,
+      link_type: sourceSlugLink.linkType,
+      context: sourceSlugLink.context,
+      link_source: sourceSlugLink.linkSource,
+      origin_slug: sourceSlugLink.originSlug,
+      origin_field: sourceSlugLink.originField,
+      ...linkOpts,
+    });
+  }
+
+  const hasMore = start + pagesProcessed < slugList.length;
+  const created = opts.dryRun ? batch.length : await engine.addLinksBatch(batch);
+  return { created, pages_processed: pagesProcessed, last_slug: lastSlug, has_more: hasMore };
 }
 
 // --- Timeline extraction ---

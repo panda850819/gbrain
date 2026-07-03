@@ -630,6 +630,22 @@ export const FRONTMATTER_LINK_MAP: FrontmatterFieldMapping[] = [
   { fields: ['related', 'see_also'], type: 'related_to', direction: 'outgoing', dirHint: '' },
 ];
 
+export function extractSourceSlugLink(slug: string, frontmatter: Record<string, unknown>): LinkCandidate | null {
+  const raw = frontmatter.source_slug;
+  if (typeof raw !== 'string') return null;
+  const sourceSlug = raw.trim().replace(/\.md$/i, '');
+  if (!sourceSlug || sourceSlug === slug || sourceSlug.includes('://')) return null;
+  return {
+    fromSlug: sourceSlug,
+    targetSlug: slug,
+    linkType: 'source',
+    context: 'atom-extraction: source_slug',
+    linkSource: 'frontmatter',
+    originSlug: slug,
+    originField: 'source_slug',
+  };
+}
+
 // ─── Slug resolver ──────────────────────────────────────────────
 
 export interface SlugResolver {
@@ -765,6 +781,9 @@ export async function extractFrontmatterLinks(
 ): Promise<FrontmatterExtractResult> {
   const candidates: LinkCandidate[] = [];
   const unresolved: UnresolvedFrontmatterRef[] = [];
+
+  const sourceSlugLink = extractSourceSlugLink(slug, frontmatter);
+  if (sourceSlugLink) candidates.push(sourceSlugLink);
 
   for (const mapping of FRONTMATTER_LINK_MAP) {
     if (mapping.pageType && mapping.pageType !== pageType) continue;

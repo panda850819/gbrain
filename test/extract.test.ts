@@ -85,6 +85,21 @@ describe('extractLinksFromFile', () => {
     expect(links).toEqual([]);
   });
 
+  it('extracts source_slug edge even when frontmatter extraction is default OFF', async () => {
+    const content = '---\nsource_slug: notes/source-page\ntype: concept\n---\nAtom.';
+    const allSlugs = new Set(['notes/source-page', 'atoms/a1']);
+    const links = await extractLinksFromFile(content, 'atoms/a1.md', allSlugs);
+    expect(links).toEqual([{
+      from_slug: 'notes/source-page',
+      to_slug: 'atoms/a1',
+      link_type: 'source',
+      context: 'atom-extraction: source_slug',
+      link_source: 'frontmatter',
+      origin_slug: 'atoms/a1',
+      origin_field: 'source_slug',
+    }]);
+  });
+
   it('infers link type from directory structure', async () => {
     const content = 'See [Brex](../companies/brex.md).';
     const allSlugs = new Set(['people/pedro', 'companies/brex']);
