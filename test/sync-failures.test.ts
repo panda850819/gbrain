@@ -119,7 +119,7 @@ describe('Bug 9 — sync-failures JSONL helpers', () => {
     recordSyncFailures([
       { path: 'notes/bad.md', error: 'Frontmatter slug "bad" does not match path-derived slug "notes/bad"' },
       { path: 'notes/still-bad.md', error: 'YAML parse failed: bad colon' },
-    ], 'commit1');
+    ], 'commit1', repoPath);
 
     const result = resolveMissingSyncFailures(repoPath);
     expect(result.count).toBe(1);
@@ -133,6 +133,42 @@ describe('Bug 9 — sync-failures JSONL helpers', () => {
     expect(resolved?.resolved).toBe(true);
     expect(resolved?.resolution).toBe('missing_file');
     expect(typeof resolved?.resolved_at).toBe('string');
+  });
+
+  test('resolveMissingSyncFailures never clears another source\'s records', async () => {
+    const { recordSyncFailures, resolveMissingSyncFailures, unresolvedSyncFailures } =
+      await import('../src/core/sync.ts');
+    const repoA = join(tmpHome, 'repo-a');
+    const repoB = join(tmpHome, 'repo-b');
+    mkdirSync(repoA, { recursive: true });
+    mkdirSync(repoB, { recursive: true });
+
+    // Recorded against repo B; the file is genuinely missing from BOTH trees.
+    recordSyncFailures([{ path: 'notes/only-in-b.md', error: 'YAML parse failed' }], 'c1', repoB);
+
+    // Retrying sync on repo A must not touch B's record, even with the
+    // single-source legacy escape hatch enabled.
+    const result = resolveMissingSyncFailures(repoA, { resolveUnattributed: true });
+    expect(result.count).toBe(0);
+    expect(unresolvedSyncFailures()).toHaveLength(1);
+  });
+
+  test('legacy unattributed records resolve only when caller attests single-source', async () => {
+    const { recordSyncFailures, resolveMissingSyncFailures, unresolvedSyncFailures } =
+      await import('../src/core/sync.ts');
+    const repoPath = join(tmpHome, 'repo');
+    mkdirSync(repoPath, { recursive: true });
+
+    // Legacy row: no repo stamp (pre-v0.42 shape).
+    recordSyncFailures([{ path: 'notes/gone.md', error: 'YAML parse failed' }], 'c1');
+
+    // Default: unattributed rows are left alone.
+    expect(resolveMissingSyncFailures(repoPath).count).toBe(0);
+    expect(unresolvedSyncFailures()).toHaveLength(1);
+
+    // Single-source attestation: safe to resolve.
+    expect(resolveMissingSyncFailures(repoPath, { resolveUnattributed: true }).count).toBe(1);
+    expect(unresolvedSyncFailures()).toHaveLength(0);
   });
 
   test('unresolvedSyncFailures excludes legacy acknowledged rows', async () => {
@@ -221,7 +257,9 @@ describe('Bug 9 — sync.ts CLI flag wiring', () => {
 
   test('performSync resolves missing failed files when --retry-failed is set', async () => {
     const source = await Bun.file(new URL('../src/commands/sync.ts', import.meta.url)).text();
-    expect(source).toMatch(/if \(opts\.retryFailed\) \{[\s\S]*?resolveMissingSyncFailures\(repoPath\)/);
+    expect(source).toMatch(/if \(opts\.retryFailed\) \{[\s\S]*?resolveMissingSyncFailures\(repoPath, \{ resolveUnattributed \}\)/);
+    // Legacy rows only auto-resolve on single-source brains.
+    expect(source).toMatch(/count\(\*\)::int AS n FROM sources[\s\S]*?<= 1/);
   });
 
   test('performSync gates sync.last_commit on failedFiles.length', async () => {

@@ -360,6 +360,8 @@ export interface SyncFailure {
   resolved?: boolean;
   resolved_at?: string;
   resolution?: 'missing_file';
+  /** Absolute repo path the failure was recorded against (v0.42+). Legacy rows lack it. */
+  repo?: string;
 }
 
 /**
@@ -504,6 +506,7 @@ export function loadSyncFailures(): SyncFailure[] {
 export function recordSyncFailures(
   failures: Array<{ path: string; error: string; line?: number }>,
   commit: string,
+  repoPath?: string,
 ): void {
   if (failures.length === 0) return;
   const existing = loadSyncFailures();
@@ -519,6 +522,7 @@ export function recordSyncFailures(
       commit,
       line: f.line,
       ts: now,
+      ...(repoPath ? { repo: _normalizeRepoPath(repoPath) } : {}),
     };
     if (seen.has(_dedupKey(entry))) continue;
     _appendFileSync(syncFailuresPath(), JSON.stringify(entry) + '\n');
@@ -578,6 +582,11 @@ function _isRepoRelativeFailurePath(path: string): boolean {
   return normalized !== '..' && !normalized.startsWith('../') && !normalized.includes('/../');
 }
 
+function _normalizeRepoPath(repoPath: string): string {
+  const normalized = _normalizePath(repoPath).replace(/\\/g, '/');
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
+}
+
 /** Return failures that still need user action. */
 export function unresolvedSyncFailures(): SyncFailure[] {
   return loadSyncFailures().filter(f => !_isAcknowledgedFailure(f) && !_isResolvedFailure(f));
@@ -593,14 +602,23 @@ export function unacknowledgedSyncFailures(): SyncFailure[] {
  * present in the repo. Used by `gbrain sync --retry-failed`: deletion makes a
  * recorded parse/slug failure moot, so it should stop blocking doctor.
  */
-export function resolveMissingSyncFailures(repoPath: string): AcknowledgeResult {
+export function resolveMissingSyncFailures(
+  repoPath: string,
+  opts: { resolveUnattributed?: boolean } = {},
+): AcknowledgeResult {
   const entries = loadSyncFailures();
   if (entries.length === 0) return { count: 0, summary: [] };
   const now = new Date().toISOString();
+  const repo = _normalizeRepoPath(repoPath);
   let changed = 0;
   const newlyResolved: SyncFailure[] = [];
   const updated = entries.map(e => {
     if (_isAcknowledgedFailure(e) || _isResolvedFailure(e) || !_isRepoRelativeFailurePath(e.path)) return e;
+    // Scope guard: the failures JSONL is brain-global, but existence can only
+    // be checked against the repo being synced. Entries stamped with a repo
+    // must match it; legacy unstamped entries are only resolvable when the
+    // caller attests there is no other source they could belong to.
+    if (e.repo ? _normalizeRepoPath(e.repo) !== repo : !opts.resolveUnattributed) return e;
     if (_existsSync(_joinPath(repoPath, e.path))) return e;
     changed++;
     const resolved = {
