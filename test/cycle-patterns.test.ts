@@ -10,6 +10,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'fs';
+import { __testing } from '../src/core/cycle/patterns.ts';
 
 const patternsSrc = readFileSync(
   new URL('../src/core/cycle/patterns.ts', import.meta.url),
@@ -26,7 +27,7 @@ describe('patterns phase wiring', () => {
   test('threads allowed_slug_prefixes from filing-rules JSON', () => {
     expect(patternsSrc).toContain('allowed_slug_prefixes');
     expect(patternsSrc).toContain('_brain-filing-rules.json');
-    expect(patternsSrc).toContain('dream_synthesize_paths');
+    expect(patternsSrc).toContain('dream_patterns_path');
   });
 
   test('reads min_evidence + lookback_days config', () => {
@@ -65,6 +66,42 @@ describe('patterns phase wiring', () => {
   test('does NOT use raw_data table (Codex #3 fix)', () => {
     expect(patternsSrc).not.toContain('putRawData');
     expect(patternsSrc).not.toContain('getRawData');
+  });
+});
+
+describe('patterns write target source of truth', () => {
+  test('derives prompt slug format and allowed_slug_prefixes from the same rule', () => {
+    const rule = __testing.parsePatternWriteRule({
+      dream_synthesize_paths: {
+        globs: ['wiki/personal/reflections/*', 'wiki/originals/*'],
+      },
+      dream_patterns_path: {
+        glob: 'wiki/personal/patterns/*',
+        slug_format: 'wiki/personal/patterns/<topic-slug>',
+      },
+    });
+
+    expect(rule).not.toBeNull();
+    expect(__testing.allowedSlugPrefixesForPatterns(rule!)).toEqual(['wiki/personal/patterns/*']);
+
+    const prompt = __testing.buildPatternsPrompt([
+      { slug: 'wiki/personal/reflections/one', title: 'One', excerpt: 'alpha' },
+      { slug: 'wiki/personal/reflections/two', title: 'Two', excerpt: 'alpha' },
+      { slug: 'wiki/personal/reflections/three', title: 'Three', excerpt: 'alpha' },
+    ], 3, rule!);
+
+    expect(prompt).toContain('Pattern slug format: `wiki/personal/patterns/<topic-slug>`');
+    expect(prompt).toContain('Anything outside wiki/personal/patterns/.');
+  });
+
+  test('does not fall back to synthesize paths for patterns writes', () => {
+    const rule = __testing.parsePatternWriteRule({
+      dream_synthesize_paths: {
+        globs: ['wiki/personal/reflections/*', 'wiki/originals/*'],
+      },
+    });
+
+    expect(rule).toBeNull();
   });
 });
 

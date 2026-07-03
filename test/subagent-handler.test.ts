@@ -18,6 +18,7 @@ import { MinionQueue } from '../src/core/minions/queue.ts';
 import {
   makeSubagentHandler,
   RateLeaseUnavailableError,
+  __testing,
   type MessagesClient,
 } from '../src/core/minions/handlers/subagent.ts';
 import type { ToolDef, MinionJobContext } from '../src/core/minions/types.ts';
@@ -366,6 +367,95 @@ describe('subagent handler replay (crash recovery)', () => {
     const client = new FakeMessagesClient([]);
     const handler = makeSubagentHandler({ engine, client, toolRegistry: [nonIdempotent] });
     await expect(handler(ctx)).rejects.toThrow(/non-idempotent/);
+  });
+
+  test('strips orphaned retained tool calls before the next model call', async () => {
+    const ctx = await makeCtx({ prompt: 'start' });
+    await engine.executeRaw(
+      `INSERT INTO subagent_messages (job_id, message_idx, role, content_blocks)
+       VALUES ($1, 0, 'user', $2::jsonb)`,
+      [ctx.id, JSON.stringify([{ type: 'text', text: 'start' }])],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_messages (job_id, message_idx, role, content_blocks)
+       VALUES ($1, 1, 'assistant', $2::jsonb)`,
+      [
+        ctx.id,
+        JSON.stringify([
+          { type: 'text', text: 'I will call a tool.' },
+          { type: 'tool_use', id: 'tu_orphan', name: 'echo', input: { value: 'lost' } },
+        ]),
+      ],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_messages (job_id, message_idx, role, content_blocks)
+       VALUES ($1, 2, 'user', $2::jsonb)`,
+      [ctx.id, JSON.stringify([{ type: 'text', text: 'not a tool result' }])],
+    );
+
+    const client = new FakeMessagesClient([
+      { content: [{ type: 'text', text: 'continued' }] as any, stop_reason: 'end_turn' },
+    ]);
+    const handler = makeSubagentHandler({ engine, client, toolRegistry: [makeEchoTool()] });
+    const result = await handler(ctx);
+
+    expect(result.result).toBe('continued');
+    const sent = client.calls[0]!.messages;
+    expect(JSON.stringify(sent)).not.toContain('tu_orphan');
+    expect(JSON.stringify(sent)).toContain('I will call a tool.');
+  });
+});
+
+describe('subagent transcript tool-pairing sanitizer', () => {
+  test('preserves provider-neutral tool-call blocks when the next message has matching tool-result blocks', () => {
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'go' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool-call', toolCallId: 'call_ok', toolName: 'search', input: {} }],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'tool-result', toolCallId: 'call_ok', toolName: 'search', output: 'ok' }],
+      },
+    ];
+
+    expect(__testing.sanitizeToolPairingForNextChat(messages)).toEqual(messages);
+  });
+
+  test('drops provider-neutral orphaned tool-call-only assistant messages', () => {
+    const repaired = __testing.sanitizeToolPairingForNextChat([
+      { role: 'user', content: [{ type: 'text', text: 'go' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool-call', toolCallId: 'call_missing', toolName: 'search', input: {} }],
+      },
+      { role: 'user', content: [{ type: 'text', text: 'ordinary follow-up' }] },
+    ]);
+
+    expect(JSON.stringify(repaired)).not.toContain('call_missing');
+    expect(repaired).toHaveLength(2);
+  });
+
+  test('removes partial orphaned tool-result blocks when stripping an invalid assistant tool-call set', () => {
+    const repaired = __testing.sanitizeToolPairingForNextChat([
+      { role: 'user', content: [{ type: 'text', text: 'go' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', toolCallId: 'call_1', toolName: 'search', input: {} },
+          { type: 'tool-call', toolCallId: 'call_2', toolName: 'search', input: {} },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'tool-result', toolCallId: 'call_1', toolName: 'search', output: 'partial' }],
+      },
+    ]);
+
+    expect(JSON.stringify(repaired)).not.toContain('call_1');
+    expect(JSON.stringify(repaired)).not.toContain('call_2');
+    expect(repaired).toHaveLength(1);
   });
 });
 
