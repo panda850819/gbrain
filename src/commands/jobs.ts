@@ -1045,6 +1045,37 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     return await runExtractCore(engine, { mode, dir, dryRun: !!job.data.dryRun });
   });
 
+  worker.register('extract-atoms-drain', async (job) => {
+    const { backfillAtomSourceLinks } = await import('./extract.ts');
+    const rawBatchSize = typeof job.data.batchSize === 'number'
+      ? job.data.batchSize
+      : (typeof job.data.batch_size === 'number' ? job.data.batch_size : 100);
+    const batchSize = Math.max(1, Math.min(1000, Math.floor(rawBatchSize)));
+    const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+    const cursor = typeof job.data.cursor === 'string' ? job.data.cursor : undefined;
+
+    const result = await backfillAtomSourceLinks(engine, {
+      sourceId,
+      afterSlug: cursor,
+      limit: batchSize,
+      dryRun: !!job.data.dryRun,
+    });
+    await job.updateProgress({ phase: 'extract-atoms-drain', ...result });
+
+    if (result.has_more && result.last_slug && !job.signal.aborted) {
+      const queue = new MinionQueue(engine);
+      const nextData = { ...job.data, cursor: result.last_slug, batchSize };
+      const sourceKey = sourceId ?? 'default';
+      await queue.add('extract-atoms-drain', nextData, {
+        queue: typeof job.data.queue === 'string' ? job.data.queue : 'default',
+        max_attempts: 3,
+        idempotency_key: `extract-atoms-drain:${sourceKey}:${batchSize}:${result.last_slug}`,
+      });
+    }
+
+    return result;
+  });
+
   worker.register('backlinks', async (job) => {
     const { runBacklinksCore } = await import('./backlinks.ts');
     const action: 'check' | 'fix' = job.data.action === 'check' ? 'check' : 'fix';

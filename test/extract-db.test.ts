@@ -10,7 +10,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runExtract } from '../src/commands/extract.ts';
+import { backfillAtomSourceLinks, runExtract } from '../src/commands/extract.ts';
 import type { PageInput } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
@@ -85,6 +85,70 @@ describe('gbrain extract links --source db', () => {
     await runExtract(engine, ['links', '--source', 'db']);
     const after2 = await engine.getLinks('companies/acme');
     expect(after2.length).toBe(after1.length);
+  });
+
+  test('source_slug frontmatter creates idempotent source-to-atom edge', async () => {
+    await engine.putPage('reflections/daily/2026-07-03', {
+      type: 'note',
+      title: 'Daily',
+      compiled_truth: 'Source page',
+      timeline: '',
+    });
+    await engine.putPage('atoms/2026-07-03-source-page-a1', {
+      type: 'concept',
+      title: 'Atom',
+      compiled_truth: 'Distilled atom',
+      timeline: '',
+      frontmatter: { source_slug: 'reflections/daily/2026-07-03' },
+    });
+
+    await runExtract(engine, ['links', '--source', 'db']);
+    await runExtract(engine, ['links', '--source', 'db']);
+
+    const links = await engine.getLinks('reflections/daily/2026-07-03');
+    const atomLinks = links.filter(l => l.to_slug === 'atoms/2026-07-03-source-page-a1');
+    expect(atomLinks).toHaveLength(1);
+    expect(atomLinks[0]).toMatchObject({
+      link_type: 'source',
+      link_source: 'frontmatter',
+      origin_slug: 'atoms/2026-07-03-source-page-a1',
+      origin_field: 'source_slug',
+    });
+  });
+
+  test('atom source backfill chunks by cursor and reports created count', async () => {
+    await engine.putPage('notes/source', {
+      type: 'note',
+      title: 'Source',
+      compiled_truth: '',
+      timeline: '',
+    });
+    await engine.putPage('atoms/a', {
+      type: 'concept',
+      title: 'A',
+      compiled_truth: '',
+      timeline: '',
+      frontmatter: { source_slug: 'notes/source' },
+    });
+    await engine.putPage('atoms/b', {
+      type: 'concept',
+      title: 'B',
+      compiled_truth: '',
+      timeline: '',
+      frontmatter: { source_slug: 'notes/source' },
+    });
+
+    const first = await backfillAtomSourceLinks(engine, { limit: 1 });
+    expect(first.pages_processed).toBe(1);
+    expect(first.created).toBe(1);
+    expect(first.has_more).toBe(true);
+
+    const second = await backfillAtomSourceLinks(engine, { afterSlug: first.last_slug ?? undefined, limit: 10 });
+    expect(second.created).toBe(1);
+    expect(second.has_more).toBe(false);
+
+    const third = await backfillAtomSourceLinks(engine, { limit: 10 });
+    expect(third.created).toBe(0);
   });
 
   test('skips refs to non-existent target pages', async () => {
