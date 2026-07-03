@@ -4,11 +4,11 @@ version: 1.0.0
 description: |
   Ingest links, articles, tweets, and ideas into the brain. Fetch content, save
   to brain with analysis, create author people page, and cross-link. Use when the
-  user shares a link or says "read this", "save this", "think about this".
+  user shares a link or says "read this", "save this link", "think about this".
 triggers:
   - shares a link or URL
   - "read this"
-  - "save this"
+  - "save this link"
   - "think about this"
   - "put this in brain"
 tools:

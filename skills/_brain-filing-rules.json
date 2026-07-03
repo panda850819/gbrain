@@ -40,6 +40,12 @@
       "description": "A multi-session piece of work with its own arc."
     },
     {
+      "kind": "goal",
+      "directory": "goals/",
+      "examples": ["personal portfolio goals", "operating-layer goals", "health goals"],
+      "description": "A page whose primary subject is one ongoing goal: desired outcome, current status, and the projects serving it."
+    },
+    {
       "kind": "analysis",
       "directory": "analysis/",
       "examples": ["deep dives", "comparative studies"],
