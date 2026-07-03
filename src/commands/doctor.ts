@@ -1148,9 +1148,12 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
         `embed ${health.embed_coverage_score}/35`,
         `links ${health.link_density_score}/25`,
         `timeline ${health.timeline_coverage_score}/15`,
-        `orphans ${health.no_orphans_score}/15`,
+        `knowledge-orphans ${health.no_orphans_score}/15`,
         `dead-links ${health.no_dead_links_score}/10`,
       ];
+      if (health.flow_orphan_pages !== undefined && health.flow_orphan_pages > 0) {
+        parts.push(`flow-orphans ${health.flow_orphan_pages} informational`);
+      }
       checks.push({
         name: 'brain_score',
         status: health.brain_score >= 70 ? 'ok' : 'warn',

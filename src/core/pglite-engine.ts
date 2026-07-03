@@ -39,6 +39,7 @@ import { deriveResolutionTuple, finalizeScorecard } from './takes-resolution.ts'
 import { normalizeWeightForStorage } from './takes-fence.ts';
 import { GBrainError, PAGE_SORT_SQL } from './types.ts';
 import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
+import { flowPageTypeSqlList } from './orphan-tiers.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql } from './search/sql-ranking.ts';
 
@@ -1556,19 +1557,20 @@ export class PGLiteEngine implements BrainEngine {
     return out;
   }
 
-  async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
+  async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null; type: string | null }>> {
     const { rows } = await this.db.query(
       `SELECT
          p.slug,
          COALESCE(p.title, p.slug) AS title,
-         p.frontmatter->>'domain' AS domain
+         p.frontmatter->>'domain' AS domain,
+         p.type
        FROM pages p
        WHERE NOT EXISTS (
          SELECT 1 FROM links l WHERE l.to_page_id = p.id
        )
        ORDER BY p.slug`
     );
-    return rows as Array<{ slug: string; title: string; domain: string | null }>;
+    return rows as Array<{ slug: string; title: string; domain: string | null; type: string | null }>;
   }
 
   // Tags
@@ -2583,6 +2585,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async getHealth(): Promise<BrainHealth> {
+    const flowTypes = flowPageTypeSqlList();
     // Combined metrics from master (brain_score components: dead_links, link_count,
     // pages_with_timeline) and v0.10.3 graph layer (link_coverage, timeline_coverage,
     // most_connected). Both coexist: master's brain_score is the composite
@@ -2590,9 +2593,17 @@ export class PGLiteEngine implements BrainEngine {
     const { rows: [h] } = await this.db.query(`
       WITH entity_pages AS (
         SELECT id, slug FROM pages WHERE type IN ('person', 'company')
+      ),
+      knowledge_pages AS (
+        SELECT id, slug FROM pages WHERE type NOT IN (${flowTypes})
+      ),
+      flow_pages AS (
+        SELECT id, slug FROM pages WHERE type IN (${flowTypes})
       )
       SELECT
         (SELECT count(*) FROM pages) as page_count,
+        (SELECT count(*) FROM knowledge_pages) as knowledge_page_count,
+        (SELECT count(*) FROM flow_pages) as flow_page_count,
         (SELECT count(*) FROM content_chunks WHERE embedded_at IS NOT NULL)::float /
           GREATEST((SELECT count(*) FROM content_chunks), 1)::float as embed_coverage,
         (SELECT count(*) FROM pages p
@@ -2600,10 +2611,14 @@ export class PGLiteEngine implements BrainEngine {
         ) as stale_pages,
         -- Bug 11 — orphan = islanded (no inbound AND no outbound).
         -- See BrainHealth.orphan_pages docstring; docs updated to match this.
-        (SELECT count(*) FROM pages p
+        (SELECT count(*) FROM knowledge_pages p
          WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)
            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id)
         ) as orphan_pages,
+        (SELECT count(*) FROM flow_pages p
+         WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)
+           AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id)
+        ) as flow_orphan_pages,
         (SELECT count(*) FROM links l
          WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id)
         ) as dead_links,
@@ -2630,15 +2645,18 @@ export class PGLiteEngine implements BrainEngine {
 
     const r = h as Record<string, unknown>;
     const pageCount = Number(r.page_count);
+    const knowledgePageCount = Number(r.knowledge_page_count);
+    const flowPageCount = Number(r.flow_page_count);
     const embedCoverage = Number(r.embed_coverage);
     const orphanPages = Number(r.orphan_pages);
+    const flowOrphanPages = Number(r.flow_orphan_pages);
     const deadLinks = Number(r.dead_links);
     const linkCount = Number(r.link_count);
     const pagesWithTimeline = Number(r.pages_with_timeline);
 
     const linkDensity = pageCount > 0 ? Math.min(linkCount / pageCount, 1) : 0;
     const timelineCoverageDensity = pageCount > 0 ? Math.min(pagesWithTimeline / pageCount, 1) : 0;
-    const noOrphans = pageCount > 0 ? 1 - (orphanPages / pageCount) : 1;
+    const noOrphans = knowledgePageCount > 0 ? 1 - (orphanPages / knowledgePageCount) : 1;
     const noDeadLinks = pageCount > 0 ? 1 - Math.min(deadLinks / pageCount, 1) : 1;
     // Bug 11 — per-component points. Sum equals brainScore by construction
     // so `doctor` can render a breakdown that adds up to the total.
@@ -2651,9 +2669,12 @@ export class PGLiteEngine implements BrainEngine {
 
     return {
       page_count: pageCount,
+      knowledge_page_count: knowledgePageCount,
+      flow_page_count: flowPageCount,
       embed_coverage: embedCoverage,
       stale_pages: Number(r.stale_pages),
       orphan_pages: orphanPages,
+      flow_orphan_pages: flowOrphanPages,
       missing_embeddings: Number(r.missing_embeddings),
       brain_score: brainScore,
       dead_links: deadLinks,

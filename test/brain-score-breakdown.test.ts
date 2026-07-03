@@ -112,6 +112,29 @@ describe('Bug 11 — orphan_pages is "no inbound links"', () => {
     // source has no inbound (but has outbound) → not orphan under new definition.
     expect(h.orphan_pages).toBe(0);
   });
+
+  test('flow-type orphan pages are informational and do not reduce no_orphans_score', async () => {
+    await engine.putPage('people/alice', { type: 'person', title: 'Alice', compiled_truth: 'actionable', frontmatter: {} });
+    await engine.putPage('people/bob', { type: 'person', title: 'Bob', compiled_truth: 'actionable', frontmatter: {} });
+    await engine.putPage('atoms/a1', { type: 'atom' as any, title: 'Atom', compiled_truth: 'flow', frontmatter: {} });
+    await engine.putPage('sessions/s1', { type: 'session' as any, title: 'Session', compiled_truth: 'flow', frontmatter: {} });
+    await engine.putPage('reports/r1', { type: 'report' as any, title: 'Report', compiled_truth: 'flow', frontmatter: {} });
+
+    const aliceId = (await (engine as any).db.query(`SELECT id FROM pages WHERE slug='people/alice'`)).rows[0].id;
+    const bobId = (await (engine as any).db.query(`SELECT id FROM pages WHERE slug='people/bob'`)).rows[0].id;
+    await (engine as any).db.query(
+      `INSERT INTO links (from_page_id, to_page_id, link_type) VALUES ($1, $2, 'mentions')`,
+      [aliceId, bobId],
+    );
+
+    const h = await engine.getHealth();
+
+    expect(h.knowledge_page_count).toBe(2);
+    expect(h.flow_page_count).toBe(3);
+    expect(h.orphan_pages).toBe(0);
+    expect(h.flow_orphan_pages).toBe(3);
+    expect(h.no_orphans_score).toBe(15);
+  });
 });
 
 describe('Bug 11 — doctor renders brain_score breakdown', () => {

@@ -130,6 +130,8 @@ describe('formatOrphansText', () => {
     return {
       orphans,
       total_orphans: orphans.length,
+      knowledge_orphans: orphans.filter(o => o.tier === 'knowledge').length,
+      flow_orphans: orphans.filter(o => o.tier === 'flow').length,
       total_linkable: orphans.length + 50,
       total_pages: orphans.length + 60,
       excluded: 10,
@@ -140,7 +142,7 @@ describe('formatOrphansText', () => {
   test('shows summary line', () => {
     const result = makeResult([]);
     const out = formatOrphansText(result);
-    expect(out).toContain('0 orphans out of');
+    expect(out).toContain('0 orphans (0 knowledge scored, 0 flow informational) out of');
     expect(out).toContain('total');
     expect(out).toContain('excluded');
   });
@@ -152,9 +154,9 @@ describe('formatOrphansText', () => {
 
   test('groups orphans by domain', () => {
     const orphans: OrphanPage[] = [
-      { slug: 'companies/acme', title: 'Acme Corp', domain: 'companies' },
-      { slug: 'people/alice', title: 'Alice', domain: 'people' },
-      { slug: 'companies/beta', title: 'Beta Inc', domain: 'companies' },
+      { slug: 'companies/acme', title: 'Acme Corp', domain: 'companies', type: 'company', tier: 'knowledge' },
+      { slug: 'people/alice', title: 'Alice', domain: 'people', type: 'person', tier: 'knowledge' },
+      { slug: 'companies/beta', title: 'Beta Inc', domain: 'companies', type: 'company', tier: 'knowledge' },
     ];
     const out = formatOrphansText(makeResult(orphans));
     expect(out).toContain('[companies]');
@@ -167,9 +169,9 @@ describe('formatOrphansText', () => {
 
   test('sorts orphans alphabetically within each domain group', () => {
     const orphans: OrphanPage[] = [
-      { slug: 'companies/zeta', title: 'Zeta', domain: 'companies' },
-      { slug: 'companies/alpha', title: 'Alpha', domain: 'companies' },
-      { slug: 'companies/beta', title: 'Beta', domain: 'companies' },
+      { slug: 'companies/zeta', title: 'Zeta', domain: 'companies', type: 'company', tier: 'knowledge' },
+      { slug: 'companies/alpha', title: 'Alpha', domain: 'companies', type: 'company', tier: 'knowledge' },
+      { slug: 'companies/beta', title: 'Beta', domain: 'companies', type: 'company', tier: 'knowledge' },
     ];
     const out = formatOrphansText(makeResult(orphans));
     const alphaIdx = out.indexOf('companies/alpha');
@@ -181,7 +183,7 @@ describe('formatOrphansText', () => {
 
   test('includes slug and title in output', () => {
     const orphans: OrphanPage[] = [
-      { slug: 'companies/acme', title: 'Acme Corp', domain: 'companies' },
+      { slug: 'companies/acme', title: 'Acme Corp', domain: 'companies', type: 'company', tier: 'knowledge' },
     ];
     const out = formatOrphansText(makeResult(orphans));
     expect(out).toContain('companies/acme');
@@ -190,18 +192,31 @@ describe('formatOrphansText', () => {
 
   test('summary line shows correct numbers', () => {
     const orphans: OrphanPage[] = [
-      { slug: 'a/b', title: 'B', domain: 'a' },
-      { slug: 'a/c', title: 'C', domain: 'a' },
+      { slug: 'a/b', title: 'B', domain: 'a', type: 'concept', tier: 'knowledge' },
+      { slug: 'a/c', title: 'C', domain: 'a', type: 'concept', tier: 'knowledge' },
     ];
     const result: OrphanResult = {
       orphans,
       total_orphans: 2,
+      knowledge_orphans: 2,
+      flow_orphans: 0,
       total_linkable: 100,
       total_pages: 120,
       excluded: 20,
     };
     const out = formatOrphansText(result);
-    expect(out).toContain('2 orphans out of 100 linkable pages (120 total; 20 excluded)');
+    expect(out).toContain('2 orphans (2 knowledge scored, 0 flow informational) out of 100 linkable pages (120 total; 20 excluded)');
+  });
+
+  test('labels knowledge and flow tiers separately', () => {
+    const out = formatOrphansText(makeResult([
+      { slug: 'people/alice', title: 'Alice', domain: 'people', type: 'person', tier: 'knowledge' },
+      { slug: 'atoms/2026-01-01', title: 'Atom', domain: 'atoms', type: 'atom', tier: 'flow' },
+    ]));
+
+    expect(out).toContain('Knowledge orphans (scored): 1');
+    expect(out).toContain('Flow orphans (informational): 1');
+    expect(out.indexOf('Knowledge orphans')).toBeLessThan(out.indexOf('Flow orphans'));
   });
 });
 
@@ -268,6 +283,28 @@ describe('findOrphans (engine-injected)', () => {
 
     const slugs = result.orphans.map(o => o.slug).sort();
     expect(slugs).toContain('_atlas');
+  });
+
+  test('tiers flow-type orphan pages as informational', async () => {
+    await engine.putPage('people/alice', {
+      type: 'person',
+      title: 'Alice',
+      compiled_truth: 'actionable page',
+      timeline: '',
+    });
+    await engine.putPage('atoms/2026-01-01', {
+      type: 'atom' as any,
+      title: 'Atom',
+      compiled_truth: 'flow artifact',
+      timeline: '',
+    });
+
+    const result = await findOrphans(engine);
+
+    expect(result.knowledge_orphans).toBe(1);
+    expect(result.flow_orphans).toBe(1);
+    expect(result.orphans.find(o => o.slug === 'people/alice')?.tier).toBe('knowledge');
+    expect(result.orphans.find(o => o.slug === 'atoms/2026-01-01')?.tier).toBe('flow');
   });
 
   test('queryOrphanPages delegates to the passed engine (no global db)', async () => {

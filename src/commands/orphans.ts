@@ -15,6 +15,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { createProgress, startHeartbeat } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+import { classifyOrphanTier, orphanTierLabel, type OrphanTier } from '../core/orphan-tiers.ts';
 
 // --- Types ---
 
@@ -22,11 +23,15 @@ export interface OrphanPage {
   slug: string;
   title: string;
   domain: string;
+  type: string | null;
+  tier: OrphanTier;
 }
 
 export interface OrphanResult {
   orphans: OrphanPage[];
   total_orphans: number;
+  knowledge_orphans: number;
+  flow_orphans: number;
   total_linkable: number;
   total_pages: number;
   excluded: number;
@@ -52,8 +57,33 @@ const DENY_PREFIXES = [
   'openclaw/config/',
 ];
 
-/** First slug segments where no inbound links is expected */
-const FIRST_SEGMENT_EXCLUSIONS = new Set(['scratch', 'thoughts', 'catalog', 'entities']);
+/** First slug segments where no inbound links is expected.
+ * Vanilla defaults plus env overlay (GBRAIN_ORPHAN_EXCLUDE_FIRST_SEGMENTS,
+ * comma-separated). Matching is exact on slug.split('/')[0] — entries
+ * containing '/' will never match and are warned to stderr at module load
+ * time so the operator can correct them. The vanilla list is upstream-
+ * untouched; user-specific terminal/staging dirs (e.g. briefs, sessions,
+ * inbox, reflections) are added via env when wanted. */
+const FIRST_SEGMENT_EXCLUSIONS: Set<string> = (() => {
+  const vanilla = ['scratch', 'thoughts', 'catalog', 'entities'];
+  const raw = process.env.GBRAIN_ORPHAN_EXCLUDE_FIRST_SEGMENTS;
+  if (!raw) return new Set(vanilla);
+  const overlay: string[] = [];
+  const invalid: string[] = [];
+  for (const part of raw.split(',')) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    if (trimmed.includes('/')) {
+      invalid.push(trimmed);
+      continue;
+    }
+    overlay.push(trimmed);
+  }
+  if (invalid.length > 0) {
+    console.error(`[orphans] GBRAIN_ORPHAN_EXCLUDE_FIRST_SEGMENTS ignored entries containing '/': ${invalid.join(', ')} — matching is exact on the first slug segment, not prefix.`);
+  }
+  return new Set([...vanilla, ...overlay]);
+})();
 
 // --- Filter logic ---
 
@@ -107,7 +137,7 @@ export function deriveDomain(frontmatterDomain: string | null | undefined, slug:
  */
 export async function queryOrphanPages(
   engine: BrainEngine,
-): Promise<{ slug: string; title: string; domain: string | null }[]> {
+): Promise<{ slug: string; title: string; domain: string | null; type: string | null }[]> {
   return engine.findOrphanPages();
 }
 
@@ -130,7 +160,7 @@ export async function findOrphans(
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   progress.start('orphans.scan');
   const stopHb = startHeartbeat(progress, 'scanning pages for missing inbound links…');
-  let allOrphans: { slug: string; title: string; domain: string | null }[];
+  let allOrphans: { slug: string; title: string; domain: string | null; type: string | null }[];
   let total: number;
   try {
     allOrphans = await engine.findOrphanPages();
@@ -151,13 +181,19 @@ export async function findOrphans(
     slug: row.slug,
     title: row.title,
     domain: deriveDomain(row.domain, row.slug),
+    type: row.type,
+    tier: classifyOrphanTier(row.type),
   }));
 
   const excluded = allOrphans.length - filtered.length;
+  const knowledgeOrphans = orphans.filter(page => page.tier === 'knowledge').length;
+  const flowOrphans = orphans.length - knowledgeOrphans;
 
   return {
     orphans,
     total_orphans: orphans.length,
+    knowledge_orphans: knowledgeOrphans,
+    flow_orphans: flowOrphans,
     total_linkable: filtered.length + (total - allOrphans.length),
     total_pages: total,
     excluded,
@@ -169,9 +205,9 @@ export async function findOrphans(
 export function formatOrphansText(result: OrphanResult): string {
   const lines: string[] = [];
 
-  const { orphans, total_orphans, total_linkable, total_pages, excluded } = result;
+  const { orphans, total_orphans, knowledge_orphans, flow_orphans, total_linkable, total_pages, excluded } = result;
   lines.push(
-    `${total_orphans} orphans out of ${total_linkable} linkable pages (${total_pages} total; ${excluded} excluded)\n`,
+    `${total_orphans} orphans (${knowledge_orphans} knowledge scored, ${flow_orphans} flow informational) out of ${total_linkable} linkable pages (${total_pages} total; ${excluded} excluded)\n`,
   );
 
   if (orphans.length === 0) {
@@ -179,23 +215,31 @@ export function formatOrphansText(result: OrphanResult): string {
     return lines.join('\n');
   }
 
-  // Group by domain, sort alphabetically within each group
-  const byDomain = new Map<string, OrphanPage[]>();
-  for (const page of orphans) {
-    const list = byDomain.get(page.domain) || [];
-    list.push(page);
-    byDomain.set(page.domain, list);
-  }
+  for (const tier of ['knowledge', 'flow'] as const) {
+    const tierPages = orphans.filter(page => page.tier === tier);
+    if (tierPages.length === 0) continue;
 
-  // Sort domains alphabetically
-  const sortedDomains = [...byDomain.keys()].sort();
-  for (const domain of sortedDomains) {
-    const pages = byDomain.get(domain)!.sort((a, b) => a.slug.localeCompare(b.slug));
-    lines.push(`[${domain}]`);
-    for (const page of pages) {
-      lines.push(`  ${page.slug}  ${page.title}`);
+    lines.push(`${orphanTierLabel(tier)}: ${tierPages.length}`);
+
+    // Group by domain, sort alphabetically within each group
+    const byDomain = new Map<string, OrphanPage[]>();
+    for (const page of tierPages) {
+      const list = byDomain.get(page.domain) || [];
+      list.push(page);
+      byDomain.set(page.domain, list);
     }
-    lines.push('');
+
+    // Sort domains alphabetically
+    const sortedDomains = [...byDomain.keys()].sort();
+    for (const domain of sortedDomains) {
+      const pages = byDomain.get(domain)!.sort((a, b) => a.slug.localeCompare(b.slug));
+      lines.push(`[${domain}]`);
+      for (const page of pages) {
+        const typeLabel = page.type ? ` (${page.type})` : '';
+        lines.push(`  ${page.slug}${typeLabel}  ${page.title}`);
+      }
+      lines.push('');
+    }
   }
 
   return lines.join('\n').trimEnd();

@@ -604,6 +604,10 @@ export interface BrainStats {
 
 export interface BrainHealth {
   page_count: number;
+  /** Pages whose type is scored by the actionable knowledge orphan metric. */
+  knowledge_page_count?: number;
+  /** Operational flow pages excluded from the actionable orphan metric. */
+  flow_page_count?: number;
   embed_coverage: number;
   stale_pages: number;
   /**
@@ -615,6 +619,8 @@ export interface BrainHealth {
    * semantics after Bug 11 doc-drift fix.
    */
   orphan_pages: number;
+  /** Flow-tier islanded pages, reported for visibility but not scored. */
+  flow_orphan_pages?: number;
   missing_embeddings: number;
   /**
    * Composite quality score, 0-100. Weighted sum of five components: embed
