@@ -36,6 +36,7 @@ import type {
 } from './types.ts';
 import { GBrainError, PAGE_SORT_SQL } from './types.ts';
 import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
+import { flowPageTypeSqlList } from './orphan-tiers.ts';
 import * as db from './db.ts';
 import { ConnectionManager } from './connection-manager.ts';
 import { logConnectionEvent } from './connection-audit.ts';
@@ -1694,20 +1695,21 @@ export class PostgresEngine implements BrainEngine {
     return out;
   }
 
-  async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null }>> {
+  async findOrphanPages(): Promise<Array<{ slug: string; title: string; domain: string | null; type: string | null }>> {
     const sql = this.sql;
     const rows = await sql`
       SELECT
         p.slug,
         COALESCE(p.title, p.slug) AS title,
-        p.frontmatter->>'domain' AS domain
+        p.frontmatter->>'domain' AS domain,
+        p.type
       FROM pages p
       WHERE NOT EXISTS (
         SELECT 1 FROM links l WHERE l.to_page_id = p.id
       )
       ORDER BY p.slug
     `;
-    return rows as unknown as Array<{ slug: string; title: string; domain: string | null }>;
+    return rows as unknown as Array<{ slug: string; title: string; domain: string | null; type: string | null }>;
   }
 
   // Tags
@@ -2699,6 +2701,7 @@ export class PostgresEngine implements BrainEngine {
 
   async getHealth(): Promise<BrainHealth> {
     const sql = this.sql;
+    const flowTypes = sql.unsafe(flowPageTypeSqlList());
     // Bug 11 doc-drift fix — orphan_pages means "islanded" (no inbound AND
     // no outbound links), aligning both engines with the user-facing
     // definition. The type comment previously said "no inbound" but the
@@ -2708,18 +2711,30 @@ export class PostgresEngine implements BrainEngine {
     const [h] = await sql`
       WITH entity_pages AS (
         SELECT id, slug FROM pages WHERE type IN ('person', 'company')
+      ),
+      knowledge_pages AS (
+        SELECT id, slug FROM pages WHERE type NOT IN (${flowTypes})
+      ),
+      flow_pages AS (
+        SELECT id, slug FROM pages WHERE type IN (${flowTypes})
       )
       SELECT
         (SELECT count(*) FROM pages) as page_count,
+        (SELECT count(*) FROM knowledge_pages) as knowledge_page_count,
+        (SELECT count(*) FROM flow_pages) as flow_page_count,
         (SELECT count(*) FROM content_chunks WHERE embedded_at IS NOT NULL)::float /
           GREATEST((SELECT count(*) FROM content_chunks), 1)::float as embed_coverage,
         (SELECT count(*) FROM pages p
          WHERE p.updated_at < (SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id)
         ) as stale_pages,
-        (SELECT count(*) FROM pages p
+        (SELECT count(*) FROM knowledge_pages p
          WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)
            AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id)
         ) as orphan_pages,
+        (SELECT count(*) FROM flow_pages p
+         WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)
+           AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id)
+        ) as flow_orphan_pages,
         (SELECT count(*) FROM links l
          WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id)
         ) as dead_links,
@@ -2744,8 +2759,11 @@ export class PostgresEngine implements BrainEngine {
     `;
 
     const pageCount = Number(h.page_count);
+    const knowledgePageCount = Number(h.knowledge_page_count);
+    const flowPageCount = Number(h.flow_page_count);
     const embedCoverage = Number(h.embed_coverage);
     const orphanPages = Number(h.orphan_pages);
+    const flowOrphanPages = Number(h.flow_orphan_pages);
     const deadLinks = Number(h.dead_links);
     const linkCount = Number(h.link_count);
     const pagesWithTimeline = Number(h.pages_with_timeline);
@@ -2753,7 +2771,7 @@ export class PostgresEngine implements BrainEngine {
     // brain_score: 0-100 weighted average
     const linkDensity = pageCount > 0 ? Math.min(linkCount / pageCount, 1) : 0;
     const timelineCoverageWhole = pageCount > 0 ? Math.min(pagesWithTimeline / pageCount, 1) : 0;
-    const noOrphans = pageCount > 0 ? 1 - (orphanPages / pageCount) : 1;
+    const noOrphans = knowledgePageCount > 0 ? 1 - (orphanPages / knowledgePageCount) : 1;
     const noDeadLinks = pageCount > 0 ? 1 - Math.min(deadLinks / pageCount, 1) : 1;
     // Per-component points. Sum equals brainScore by construction.
     const embedCoverageScore = pageCount === 0 ? 0 : Math.round(embedCoverage * 35);
@@ -2765,9 +2783,12 @@ export class PostgresEngine implements BrainEngine {
 
     return {
       page_count: pageCount,
+      knowledge_page_count: knowledgePageCount,
+      flow_page_count: flowPageCount,
       embed_coverage: embedCoverage,
       stale_pages: Number(h.stale_pages),
       orphan_pages: orphanPages,
+      flow_orphan_pages: flowOrphanPages,
       missing_embeddings: Number(h.missing_embeddings),
       brain_score: brainScore,
       dead_links: deadLinks,
