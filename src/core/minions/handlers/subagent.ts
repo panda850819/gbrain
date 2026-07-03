@@ -181,7 +181,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     const priorToolByUseId = new Map(priorTools.map(t => [t.tool_use_id, t]));
 
     // Rebuild the Anthropic messages array from persisted rows.
-    const anthroMessages: Anthropic.MessageParam[] = priorMessages.length > 0
+    let anthroMessages: Anthropic.MessageParam[] = priorMessages.length > 0
       ? priorMessages.map(m => ({ role: m.role, content: m.content_blocks as any }))
       : [{ role: 'user', content: data.prompt }];
 
@@ -292,6 +292,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         anthroMessages.push({ role: 'user', content: synthesizedResults as any });
       }
     }
+    anthroMessages = sanitizeToolPairingForNextChat(anthroMessages);
 
     // ── Main loop ───────────────────────────────────────────
     let stopReason: SubagentStopReason = 'error';
@@ -330,7 +331,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
           system: [
             { type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } },
           ] as any,
-          messages: anthroMessages,
+          messages: sanitizeToolPairingForNextChat(anthroMessages),
           ...(toolDefs.length > 0
             ? {
                 tools: toolDefs.map((t, i) => {
@@ -688,6 +689,83 @@ function asStringIfNotObject(value: unknown): string {
 }
 
 /**
+ * OpenAI/AI SDK rejects transcripts that retain an assistant tool call without
+ * the matching tool result in the immediately-following message. The durable
+ * DB is allowed to contain old partial rows, so repair the outbound prompt:
+ * valid pairs are preserved; orphaned tool calls are stripped from retained
+ * assistant history before the next model call.
+ */
+function sanitizeToolPairingForNextChat<T extends { role: string; content: unknown }>(messages: T[]): T[] {
+  const repaired: T[] = [];
+  let previousRetainedToolCallIds = new Set<string>();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) {
+      if ((msg.role === 'user' || msg.role === 'tool') && Array.isArray(msg.content)) {
+        const content = msg.content.filter(block => {
+          const resultId = blockToolResultId(block);
+          return !resultId || previousRetainedToolCallIds.has(resultId);
+        });
+        if (content.length > 0) repaired.push({ ...msg, content });
+      } else {
+        repaired.push(msg);
+      }
+      previousRetainedToolCallIds = new Set<string>();
+      continue;
+    }
+
+    const toolCallIds = msg.content
+      .map(blockToolCallId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    if (toolCallIds.length === 0) {
+      repaired.push(msg);
+      previousRetainedToolCallIds = new Set<string>();
+      continue;
+    }
+
+    const next = messages[i + 1];
+    if (next && messageHasToolResultsFor(next, toolCallIds)) {
+      repaired.push(msg);
+      previousRetainedToolCallIds = new Set(toolCallIds);
+      continue;
+    }
+
+    const strippedContent = msg.content.filter(block => !blockToolCallId(block));
+    previousRetainedToolCallIds = new Set<string>();
+    if (strippedContent.length === 0) continue;
+    repaired.push({ ...msg, content: strippedContent });
+  }
+  return repaired;
+}
+
+function messageHasToolResultsFor(message: { role: string; content: unknown }, toolCallIds: string[]): boolean {
+  if (message.role !== 'user' && message.role !== 'tool') return false;
+  if (!Array.isArray(message.content)) return false;
+  const resultIds = new Set(
+    message.content
+      .map(blockToolResultId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0),
+  );
+  return toolCallIds.every(id => resultIds.has(id));
+}
+
+function blockToolCallId(block: unknown): string | null {
+  if (!block || typeof block !== 'object') return null;
+  const b = block as Record<string, unknown>;
+  if (b.type === 'tool_use' && typeof b.id === 'string') return b.id;
+  if (b.type === 'tool-call' && typeof b.toolCallId === 'string') return b.toolCallId;
+  return null;
+}
+
+function blockToolResultId(block: unknown): string | null {
+  if (!block || typeof block !== 'object') return null;
+  const b = block as Record<string, unknown>;
+  if (b.type === 'tool_result' && typeof b.tool_use_id === 'string') return b.tool_use_id;
+  if (b.type === 'tool-result' && typeof b.toolCallId === 'string') return b.toolCallId;
+  return null;
+}
+
+/**
  * Merge two AbortSignals into one. Fires when either source aborts. No-op
  * polyfill when AbortSignal.any isn't available yet (Node ≥ 20 has it).
  */
@@ -764,5 +842,6 @@ export const __testing = {
   persistToolExecComplete,
   persistToolExecFailed,
   asStringIfNotObject,
+  sanitizeToolPairingForNextChat,
   DEFAULT_MODEL,
 };
