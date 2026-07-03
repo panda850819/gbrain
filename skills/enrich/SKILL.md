@@ -120,7 +120,7 @@ Goal Enrichment" below) — the rest of this protocol is for people / companies.
 For each entity:
 - `gbrain search "name"` -- does a page already exist?
 - **If yes:** UPDATE path (add new signal, update compiled truth if material)
-- **If no:** CREATE path (check notability gate first, then create)
+- **If no:** CREATE path (check notability gate per `skills/_brain-filing-rules.md` first, then create)
 
 ### Step 3: Extract signal from source
 
@@ -371,7 +371,7 @@ target page after writing.
 ### What this sub-protocol does NOT do
 
 - ❌ Create new project / goal pages from inferred signal
-- ❌ Run notability gates, web research, or external API enrichment
+- ❌ Run notability gates (`skills/_brain-filing-rules.md`), web research, or external API enrichment
 - ❌ Rewrite compiled-truth sections (the user owns scope and framing)
 - ❌ Flip status without an explicit transition signal in the source
 - ❌ Append duplicate timeline entries when the signal is already recorded
