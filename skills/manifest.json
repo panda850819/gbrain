@@ -64,6 +64,11 @@
       "path": "idea-ingest/SKILL.md",
       "description": "Ingest links, articles, tweets, and ideas into the brain with analysis and entity cross-linking."
     },
+{
+  "name": "transcript-ingest",
+  "path": "transcript-ingest/SKILL.md",
+  "description": "Capture AI conversation transcripts (Claude Code / Codex / Hermes), dedup, gate signal vs noise, and distill SIGNAL sessions into brain-ready staged notes."
+},
     {
       "name": "media-ingest",
       "path": "media-ingest/SKILL.md",
