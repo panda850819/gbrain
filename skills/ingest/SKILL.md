@@ -5,6 +5,9 @@ triggers:
   - "ingest this"
   - "save this to brain"
   - "process this meeting"
+  - "verbatim"
+  - "this snippet"
+  - "記下來"
 tools:
   - search
   - get_page
