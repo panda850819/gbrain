@@ -101,7 +101,6 @@ describe('buildAdvisory — partial-install path', () => {
       'archive-crawler',
       'academic-verify',
       'brain-pdf',
-      'voice-note-ingest',
     ]);
     const advisory = buildAdvisory({
       version: '0.25.1',
@@ -143,7 +142,6 @@ describe('buildAdvisory — all-installed → null (no nag)', () => {
       'archive-crawler',
       'academic-verify',
       'brain-pdf',
-      'voice-note-ingest',
     ];
     const { workspace, skillsDir } = scratchWorkspace(allRecommended);
     const advisory = buildAdvisory({

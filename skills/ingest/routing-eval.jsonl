@@ -1,0 +1,10 @@
+// Routing eval fixtures for skills/ingest. Each intent includes at least
+// one trigger string as substring (structural matcher requirement).
+// The verbatim / snippet-capture family moved here from the retired
+// voice-note-ingest skill (ingest is the generic save-to-brain router).
+// NOTE: the 「記下來」 trigger has no fixture — normalizeText strips
+// non-[a-z0-9], so CJK triggers are invisible to the Layer-A structural
+// matcher and can only be exercised by the LLM routing layer.
+{"intent":"Save this — what I just said about the agent stack — verbatim into the brain","expected_skill":"ingest"}
+{"intent":"Pin this snippet of our conversation, the bit where I framed the three stages","expected_skill":"ingest"}
+{"intent":"capture this snippet from our chat, no URL just my words","expected_skill":"ingest"}

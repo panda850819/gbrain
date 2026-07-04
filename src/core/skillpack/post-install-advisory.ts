@@ -83,11 +83,6 @@ const V0_25_1_RECOMMENDED: RecommendedSkill[] = [
     description:
       'Render any brain page to publication-quality PDF via the gstack make-pdf binary. Optional gstack co-install.',
   },
-  {
-    slug: 'voice-note-ingest',
-    description:
-      'Capture voice notes with EXACT-PHRASING preservation (never paraphrased). Routes content to originals/concepts/people/companies/ideas.',
-  },
 ];
 
 /**

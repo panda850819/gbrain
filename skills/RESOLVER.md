@@ -28,10 +28,10 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | Trigger | Skill |
 |---------|-------|
 | User shares a link, article, tweet, or idea | `skills/idea-ingest/SKILL.md` |
-| "watch this video", "process this YouTube link", "ingest this PDF", "save this podcast", "process this book", "summarize this book", "PDF book", "ingest it into my brain", "what's in this screenshot", "check out this repo" | `skills/media-ingest/SKILL.md` |
+| "watch this video", "process this YouTube link", "ingest this PDF", "save this podcast", "process this book", "summarize this book", "PDF book", "ingest it into my brain", "what's in this screenshot", "check out this repo", "voice memo", "voice note", "transcribe and file", "save this audio note" | `skills/media-ingest/SKILL.md` |
 | Meeting transcript received | `skills/meeting-ingestion/SKILL.md` |
 | AI conversation transcript capture (Claude Code / Codex / Hermes jsonl), "drain pending transcripts", "distill sessions" | `skills/transcript-ingest/SKILL.md` |
-| Generic "ingest this" (auto-routes to above) | `skills/ingest/SKILL.md` |
+| Generic "ingest this" (auto-routes to above); verbatim conversation capture: "verbatim", "this snippet", "記下來" | `skills/ingest/SKILL.md` |
 
 ## Thinking skills (from GStack)
 
@@ -121,5 +121,4 @@ These apply to ALL brain-writing skills:
 | "crawl my archive", "find gold in my archive", "archive crawler", "scan my dropbox for", "mine my old files for" | `skills/archive-crawler/SKILL.md` |
 | "verify this academic claim", "check this study", "academic verify", "validate citation", "is this study real" | `skills/academic-verify/SKILL.md` |
 | "make pdf from brain", "brain pdf", "convert brain page to pdf", "publish this page as pdf", "export brain page" | `skills/brain-pdf/SKILL.md` |
-| "voice note", "ingest this voice memo", "transcribe and file", "voice note ingest", "save this audio note" | `skills/voice-note-ingest/SKILL.md` |
 

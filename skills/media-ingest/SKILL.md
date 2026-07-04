@@ -16,6 +16,10 @@ triggers:
   - "ingest it into my brain"
   - "what's in this screenshot"
   - "check out this repo"
+  - "voice memo"
+  - "voice note"
+  - "transcribe and file"
+  - "save this audio note"
 tools:
   - search
   - query

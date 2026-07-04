@@ -200,11 +200,6 @@
       "description": "Generate a publication-quality PDF from any brain page via the gstack make-pdf binary; strips frontmatter, sanitizes emoji, applies running headers."
     },
     {
-      "name": "voice-note-ingest",
-      "path": "voice-note-ingest/SKILL.md",
-      "description": "Ingest voice notes with exact-phrasing preservation (never paraphrased); routes content based on a decision tree across originals/concepts/people/companies/ideas/personal/voice-notes."
-    },
-    {
       "name": "cold-start",
       "path": "cold-start/SKILL.md",
       "description": "Day-one brain bootstrapping: sequence the highest-leverage data sources (contacts, calendar, email, conversations, social, archives) to go from empty brain to useful brain. Uses ClawVisor for safe credential handling — agents never hold raw API keys."
