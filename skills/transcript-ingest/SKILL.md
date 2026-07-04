@@ -12,6 +12,8 @@ description: |
   meeting transcripts (use meeting-ingestion) or external media (media-ingest).
 triggers:
   - "ingest my transcripts"
+  - "drain pending transcripts"
+  - "distill sessions"
   - "distill my agent conversations"
   - "capture claude code / codex / hermes sessions"
   - "capture my claude code / codex / hermes sessions"
