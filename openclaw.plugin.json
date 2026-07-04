@@ -56,7 +56,6 @@
     "skills/soul-audit",
     "skills/strategic-reading",
     "skills/testing",
-    "skills/voice-note-ingest",
     "skills/webhook-transforms"
   ],
   "shared_deps": [
