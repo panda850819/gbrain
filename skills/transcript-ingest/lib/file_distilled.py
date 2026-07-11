@@ -166,7 +166,16 @@ def main():
             flag = (f"<!-- transcript-ingest: domain={dom}" +
                     (f", possible-dup-of={collide}" if collide else ", needs entity-level filing") +
                     " -->\n")
-            open(os.path.join(INBOX, f"{d}-{slug}.md"), "w").write(flag + body)
+            # Insert the flag AFTER the frontmatter block, not before it. A leading
+            # HTML comment pushes the opening --- off line 1, so gbrain can't parse
+            # the frontmatter and the page falls back to type:note + slug-titlecased
+            # title (real title/tags/domain lost).
+            if body.startswith("---"):
+                head, sep, rest = body.partition("\n---\n")
+                out = (head + sep + flag + rest) if sep else (body + "\n" + flag)
+            else:
+                out = flag + body
+            open(os.path.join(INBOX, f"{d}-{slug}.md"), "w").write(out)
             os.remove(md)
             inboxed += 1
         else:

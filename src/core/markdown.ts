@@ -223,7 +223,11 @@ function collectValidationErrors(
     const line = lines[i];
     const m = line.match(/^\s*[A-Za-z_][\w-]*\s*:\s*(.*)$/);
     if (!m) continue;
-    const value = m[1];
+    const value = m[1].trim();
+    // Only a double-quoted SCALAR can carry the broken pattern this catches
+    // (`title: "Name "Nick" Last"`). Flow collections (`["a", "b"]`) and plain
+    // scalars legitimately contain multiple double quotes and are valid YAML.
+    if (!value.startsWith('"')) continue;
     let count = 0;
     for (let j = 0; j < value.length; j++) {
       if (value[j] === '"' && (j === 0 || value[j - 1] !== '\\')) count++;
