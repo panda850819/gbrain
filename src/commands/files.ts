@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync, statSync, lstatSync, existsSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
-import { join, relative, extname, basename, dirname } from 'path';
+import { readFileSync, readdirSync, statSync, lstatSync, existsSync, writeFileSync, unlinkSync, mkdirSync, copyFileSync, realpathSync } from 'fs';
+import { join, relative, extname, basename, dirname, resolve, isAbsolute } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
@@ -179,7 +179,7 @@ async function uploadFile(engine: BrainEngine, args: string[]) {
  *
  * The .redirect.yaml pointer stays in the brain repo so git tracks what was stored.
  */
-async function uploadRaw(engine: BrainEngine, args: string[]) {
+export async function uploadRaw(engine: BrainEngine, args: string[]) {
   const filePath = args.find(a => !a.startsWith('--'));
   const pageSlug = args.find((a, i) => args[i - 1] === '--page') || null;
   const fileType = args.find((a, i) => args[i - 1] === '--type') || null;
@@ -197,11 +197,72 @@ async function uploadRaw(engine: BrainEngine, args: string[]) {
   const needsCloud = stat.size >= SIZE_THRESHOLD || isMedia;
 
   if (!needsCloud) {
-    // Small text/PDF files stay in git
+    // Small text/PDF files stay in git. "Stays in git" is only a no-op when
+    // the source already lives inside the brain repo; an out-of-repo source
+    // must be copied into the page's .raw/ sidecar or nothing lands anywhere.
+    if (!pageSlug || isAbsolute(pageSlug) || pageSlug.split('/').includes('..')) {
+      console.error('upload-raw: --page <slug> (relative, no "..") is required for git-route uploads.');
+      process.exit(1);
+    }
+    // The page file anchors the brain repo root: walk up from cwd until
+    // <dir>/<pageSlug>.md exists. This both locates the repo and validates
+    // the slug, so a typo or a wrong cwd is an error instead of a stray copy.
+    let root: string | null = null;
+    let dir = process.cwd();
+    for (let i = 0; i < 10; i++) {
+      if (existsSync(join(dir, `${pageSlug}.md`))) { root = dir; break; }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    if (!root) {
+      console.error(`upload-raw: page file ${pageSlug}.md not found walking up from ${process.cwd()}; file NOT stored. Run from inside the brain repo.`);
+      process.exit(1);
+    }
+    // realpath both sides so a symlinked tmpdir (macOS /var -> /private/var)
+    // or symlinked repo path can't defeat the containment check.
+    const absSource = realpathSync(resolve(filePath));
+    const relSource = relative(realpathSync(root), absSource);
+    if (relSource && !relSource.startsWith('..') && !isAbsolute(relSource)) {
+      // Source is already tracked by the brain repo — nothing to materialize.
+      console.log(JSON.stringify({
+        success: true,
+        storage: 'git',
+        path: absSource,
+        copied: false,
+        size: stat.size,
+        size_human: humanSize(stat.size),
+      }));
+      return;
+    }
+    const sidecarDir = join(root, dirname(pageSlug), '.raw', basename(pageSlug));
+    let destPath = join(sidecarDir, filename);
+    const hash = fileHash(filePath);
+    if (existsSync(destPath) && fileHash(destPath) === hash) {
+      console.log(JSON.stringify({
+        success: true,
+        storage: 'git',
+        path: destPath,
+        repo_path: relative(root, destPath),
+        copied: false,
+        deduped: true,
+        size: stat.size,
+        size_human: humanSize(stat.size),
+      }));
+      return;
+    }
+    if (existsSync(destPath)) {
+      const ext = extname(filename);
+      destPath = join(sidecarDir, `${basename(filename, ext)}-${hash.slice(0, 8)}${ext}`);
+    }
+    mkdirSync(sidecarDir, { recursive: true });
+    copyFileSync(absSource, destPath);
     console.log(JSON.stringify({
       success: true,
       storage: 'git',
-      path: filePath,
+      path: destPath,
+      repo_path: relative(root, destPath),
+      copied: true,
       size: stat.size,
       size_human: humanSize(stat.size),
     }));
