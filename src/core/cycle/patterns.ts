@@ -68,18 +68,18 @@ export async function runPhasePatterns(
       return skipped('no_api_key', 'ANTHROPIC_API_KEY unset; pattern detection skipped');
     }
 
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes();
-    if (allowedSlugPrefixes.length === 0) {
+    const writeRule = await loadPatternWriteRule();
+    if (!writeRule) {
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
-        'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
+        'skills/_brain-filing-rules.json missing dream_patterns_path.glob'));
     }
 
     const queue = new MinionQueue(engine);
     const data: SubagentHandlerData = {
-      prompt: buildPatternsPrompt(reflections, config.minEvidence),
+      prompt: buildPatternsPrompt(reflections, config.minEvidence, writeRule),
       model: config.model,
       max_turns: 30,
-      allowed_slug_prefixes: allowedSlugPrefixes,
+      allowed_slug_prefixes: allowedSlugPrefixesForPatterns(writeRule),
     };
     const submitOpts: Partial<MinionJobInput> = {
       max_stalled: 3,
@@ -174,7 +174,8 @@ async function gatherReflections(
   const rows = await engine.executeRaw<{ slug: string; title: string | null; compiled_truth: string | null }>(
     `SELECT slug, title, compiled_truth
        FROM pages
-      WHERE slug LIKE 'wiki/personal/reflections/%'
+      WHERE slug LIKE 'reflections/dreams/%'
+        AND deleted_at IS NULL
         AND updated_at >= $1::timestamptz
       ORDER BY updated_at DESC
       LIMIT 100`,
@@ -189,7 +190,17 @@ async function gatherReflections(
 
 // ── Prompt ────────────────────────────────────────────────────────────
 
-function buildPatternsPrompt(reflections: ReflectionRef[], minEvidence: number): string {
+interface PatternWriteRule {
+  glob: string;
+  slugFormat: string;
+  directory: string;
+}
+
+function buildPatternsPrompt(
+  reflections: ReflectionRef[],
+  minEvidence: number,
+  writeRule: PatternWriteRule,
+): string {
   const today = new Date().toISOString().slice(0, 10);
   const corpus = reflections
     .map((r, i) => `### ${i + 1}. [[${r.slug}]] — ${r.title}\n${r.excerpt}`)
@@ -199,15 +210,15 @@ function buildPatternsPrompt(reflections: ReflectionRef[], minEvidence: number):
 
 OUTPUT POLICY
 - Only name a pattern if it appears in at least ${minEvidence} DISTINCT reflections.
-- Each pattern page MUST cite the reflections that constitute its evidence (use [[wiki/personal/reflections/...]] wikilinks).
+- Each pattern page MUST cite the reflections that constitute its evidence using the [[reflections/dreams/...]] wikilinks shown below.
 - Use \`search\` to check whether a similar pattern page already exists; if yes, update it (use the same slug). If no, create a new one.
-- Pattern slug format: \`wiki/personal/patterns/<topic-slug>\` (lowercase alphanumeric + hyphens; no underscores, no extension, no date).
+- Pattern slug format: \`${writeRule.slugFormat}\` (lowercase alphanumeric + hyphens; no underscores, no extension, no date).
 - A "pattern" is a recurring theme, anxiety, decision pattern, relationship dynamic, or self-knowledge motif. NOT a single insight. NOT a list of unrelated topics.
 
 DO NOT WRITE
 - A "patterns from today" digest (that's the dream-cycle-summaries page; not your job).
 - Patterns with <${minEvidence} reflections cited.
-- Anything outside wiki/personal/patterns/.
+- Anything outside ${writeRule.directory}.
 
 CONTEXT
 - Today: ${today}
@@ -298,9 +309,9 @@ function renderPageToMarkdown(page: Page, tags: string[]): string {
   );
 }
 
-// ── Allow-list (shared with synthesize.ts) ───────────────────────────
+// ── Pattern write rule ───────────────────────────────────────────────
 
-async function loadAllowedSlugPrefixes(): Promise<string[]> {
+async function loadPatternWriteRule(): Promise<PatternWriteRule | null> {
   const candidates = [
     join(process.cwd(), 'skills', '_brain-filing-rules.json'),
     join(__dirname, '..', '..', '..', 'skills', '_brain-filing-rules.json'),
@@ -309,14 +320,35 @@ async function loadAllowedSlugPrefixes(): Promise<string[]> {
     if (!existsSync(path)) continue;
     try {
       const raw = readFileSync(path, 'utf8');
-      const parsed = JSON.parse(raw) as { dream_synthesize_paths?: { globs?: unknown } };
-      const globs = parsed?.dream_synthesize_paths?.globs;
-      if (Array.isArray(globs) && globs.every(g => typeof g === 'string')) {
-        return globs as string[];
-      }
+      const rule = parsePatternWriteRule(JSON.parse(raw));
+      if (rule) return rule;
     } catch { /* try next */ }
   }
-  return [];
+  return null;
+}
+
+function parsePatternWriteRule(parsed: unknown): PatternWriteRule | null {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const raw = (parsed as { dream_patterns_path?: unknown }).dream_patterns_path;
+  if (!raw || typeof raw !== 'object') return null;
+  const cfg = raw as { glob?: unknown; slug_format?: unknown };
+  if (typeof cfg.glob !== 'string' || cfg.glob.length === 0) return null;
+  const slugFormat = typeof cfg.slug_format === 'string' && cfg.slug_format.length > 0
+    ? cfg.slug_format
+    : cfg.glob.replace(/\*$/, '<topic-slug>');
+  return {
+    glob: cfg.glob,
+    slugFormat,
+    directory: directoryFromGlob(cfg.glob),
+  };
+}
+
+function allowedSlugPrefixesForPatterns(rule: PatternWriteRule): string[] {
+  return [rule.glob];
+}
+
+function directoryFromGlob(glob: string): string {
+  return glob.endsWith('/*') ? glob.slice(0, -1) : glob;
 }
 
 // ── Status helpers ───────────────────────────────────────────────────
@@ -349,3 +381,9 @@ function failed(error: PhaseError): PhaseResult {
 function makeError(cls: string, code: string, message: string, hint?: string): PhaseError {
   return hint ? { class: cls, code, message, hint } : { class: cls, code, message };
 }
+
+export const __testing = {
+  buildPatternsPrompt,
+  parsePatternWriteRule,
+  allowedSlugPrefixesForPatterns,
+};

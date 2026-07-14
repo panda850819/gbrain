@@ -967,10 +967,13 @@ OUTPUT POLICY (ALL of these are required)
 
 TASKS
 A. Reflections (self-knowledge, pattern recognition, emotional processing):
-   slug: \`wiki/personal/reflections/${dateHint}-<topic-slug>-${hashSuffix}\`
+   slug: \`reflections/dreams/${dateHint}-<topic-slug>-${hashSuffix}\`
+   Set type: reflection in the page frontmatter.
 
 B. Originals (new ideas, frames, theses, mental models):
-   slug: \`wiki/originals/ideas/${dateHint}-<idea-slug>-${hashSuffix}\`
+   slug: \`originals/${dateHint}-<idea-slug>-${hashSuffix}\`
+   Set type: original in the page frontmatter.
+   ONLY write B if there is a genuinely NOVEL idea/thesis DISTINCT from the reflection in A. Do NOT restate A's content as an "idea". Most transcripts yield ONE page, not two; never write a reflection and an original that say the same thing.
 
 C. People mentions: search first; if a page exists, do not put_page over it (the orchestrator handles people enrichment via timeline entries — your job is the reflection/original synthesis, NOT modifying existing person pages).
 

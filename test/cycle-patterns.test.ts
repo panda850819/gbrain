@@ -10,6 +10,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'fs';
+import { __testing } from '../src/core/cycle/patterns.ts';
 
 const patternsSrc = readFileSync(
   new URL('../src/core/cycle/patterns.ts', import.meta.url),
@@ -26,7 +27,7 @@ describe('patterns phase wiring', () => {
   test('threads allowed_slug_prefixes from filing-rules JSON', () => {
     expect(patternsSrc).toContain('allowed_slug_prefixes');
     expect(patternsSrc).toContain('_brain-filing-rules.json');
-    expect(patternsSrc).toContain('dream_synthesize_paths');
+    expect(patternsSrc).toContain('dream_patterns_path');
   });
 
   test('reads min_evidence + lookback_days config', () => {
@@ -68,9 +69,47 @@ describe('patterns phase wiring', () => {
   });
 });
 
+describe('patterns write target source of truth', () => {
+  test('derives prompt slug format and allowed_slug_prefixes from the same rule', () => {
+    const rule = __testing.parsePatternWriteRule({
+      dream_synthesize_paths: {
+        globs: ['reflections/dreams/*', 'originals/*'],
+      },
+      dream_patterns_path: {
+        glob: 'learnings/patterns/*',
+        slug_format: 'learnings/patterns/<topic-slug>',
+      },
+    });
+
+    expect(rule).not.toBeNull();
+    expect(__testing.allowedSlugPrefixesForPatterns(rule!)).toEqual(['learnings/patterns/*']);
+
+    const prompt = __testing.buildPatternsPrompt([
+      { slug: 'reflections/dreams/one', title: 'One', excerpt: 'alpha' },
+      { slug: 'reflections/dreams/two', title: 'Two', excerpt: 'alpha' },
+      { slug: 'reflections/dreams/three', title: 'Three', excerpt: 'alpha' },
+    ], 3, rule!);
+
+    expect(prompt).toContain('Pattern slug format: `learnings/patterns/<topic-slug>`');
+    expect(prompt).toContain('Anything outside learnings/patterns/.');
+    expect(prompt).toContain('[[reflections/dreams/one]]');
+  });
+
+  test('does not fall back to synthesize paths for patterns writes', () => {
+    const rule = __testing.parsePatternWriteRule({
+      dream_synthesize_paths: {
+        globs: ['reflections/dreams/*', 'originals/*'],
+      },
+    });
+
+    expect(rule).toBeNull();
+  });
+});
 describe('patterns scope filter', () => {
-  test('filters reflections by slug LIKE wiki/personal/reflections/%', () => {
-    expect(patternsSrc).toContain("slug LIKE 'wiki/personal/reflections/%'");
+  test('filters reflections by canonical dream-reflection slug', () => {
+    expect(patternsSrc).toContain("slug LIKE 'reflections/dreams/%'");
+    expect(patternsSrc).toContain('AND deleted_at IS NULL');
+    expect(patternsSrc).not.toContain("slug LIKE 'wiki/personal/reflections/%'");
   });
 
   test('orders by updated_at DESC for recency-bias', () => {
