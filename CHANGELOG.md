@@ -2,6 +2,18 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.58.1] - 2026-07-14
+
+**Dream synthesis now stays inside the brain's canonical filing tree, so an autopilot cycle cannot recreate a retired `wiki/` shadow tree.** Synthesize writes reflections under `reflections/dreams/` and original ideas under `originals/`. Pattern detection reads those reflections and writes durable cross-session learnings under `learnings/patterns/`.
+
+The two dream phases now have separate, fail-closed write contracts. Their prompts and server-enforced slug allowlists resolve from the same filing-rules document, which keeps an edited prompt from silently widening where a subagent can write. People pages remain read-only inputs to synthesis, and cycle summaries continue through the orchestrator's direct, deterministic writer.
+
+### Fixed
+- **Retired filing trees stay retired.** Synthesize and patterns no longer create pages under `wiki/personal/` or `wiki/originals/`.
+- **Pattern evidence follows the canonical reflection path.** The gather query ignores soft-deleted rows and reads only active `reflections/dreams/*` pages from the configured lookback window.
+- **Pattern writes fail closed when their filing rule is missing.** The prompt slug format and `allowed_slug_prefixes` come from the same `dream_patterns_path` entry instead of borrowing the broader synthesize allowlist.
+- **The filing contract is pinned by unit and PGLite E2E coverage.** Regression tests fail if an active dream writer path returns to `wiki/` or if the runtime, JSON rules, and Markdown rules drift apart.
+
 ## [0.42.58.0] - 2026-07-06
 
 **gbrain now runs cleanly on the stack you already have — a local Ollama box, a self-hosted LiteLLM proxy, llama.cpp's llama-server, or gbrain running as a Claude Code MCP subprocess — instead of silently degrading or hard-failing when you're not on a raw OpenAI/Anthropic key.** A provider-agnostic plumbing pass across the AI gateway: environment handling, base-URL normalization, and embedding-dimension validation all stop tripping on the non-frontier-vendor setups that used to fail without a clear signal.

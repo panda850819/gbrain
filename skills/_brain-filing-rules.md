@@ -133,17 +133,18 @@ and large files don't bloat the git repo.
 
 ## Dream-cycle synthesize / patterns directories (v0.23)
 
-The `synthesize` and `patterns` phases of `gbrain dream` write to a
-**fixed allow-list** of paths sourced from `_brain-filing-rules.json`'s
-`dream_synthesize_paths.globs` array. Editing that JSON is the ONLY way
-to add a new directory the synthesis subagent may write to:
+The `synthesize` and `patterns` phases of `gbrain dream` use separate
+**fixed allow-lists** sourced from `_brain-filing-rules.json`.
+`dream_synthesize_paths.globs` controls reflection and original writes;
+`dream_patterns_path` controls the single pattern target. Editing that JSON
+is the ONLY way to add a directory either subagent may write to:
 
 | Output type | Slug pattern | What goes here |
 |-------------|--------------|----------------|
-| Reflection | `wiki/personal/reflections/YYYY-MM-DD-<topic>-<hash[:6]>` | Self-knowledge, emotional processing, pattern recognition. Verbatim quotes from the user, with analysis. |
-| Original idea | `wiki/originals/ideas/YYYY-MM-DD-<idea>-<hash[:6]>` | New frames, theses, mental models, "conceptive ideologist" outputs. Capture the user's exact phrasing — that's the artifact. |
-| People enrichment | `wiki/people/<existing-slug>` | Timeline entries appended to existing people pages from session mentions. Stub pages for new substantive people. |
-| Pattern | `wiki/personal/patterns/<theme>` | Cross-session theme detected across ≥3 reflections. Highest-leverage output: a pattern can span 25 years if reflections reference dated content. |
+| Reflection | `reflections/dreams/YYYY-MM-DD-<topic>-<hash[:6]>` | Self-knowledge, emotional processing, pattern recognition. Verbatim quotes from the user, with analysis. |
+| Original idea | `originals/YYYY-MM-DD-<idea>-<hash[:6]>` | New frames, theses, mental models, "conceptive ideologist" outputs. Capture the user's exact phrasing — that's the artifact. |
+| People mentions | N/A (no direct write) | Existing people pages may be linked from reflection/original output; the synthesize subagent must not modify or create people pages. |
+| Pattern | `learnings/patterns/<theme>` | Cross-session theme detected across ≥3 reflections. Highest-leverage output: a pattern can span 25 years if reflections reference dated content. |
 | Cycle summary | `dream-cycle-summaries/YYYY-MM-DD` | Index of every page produced by one dream cycle. Auto-written deterministically by the orchestrator. |
 
 **Iron Law for synthesize output:**

@@ -153,13 +153,15 @@
     "Cross-link from related directories via back-links — do not duplicate content."
   ],
   "dream_synthesize_paths": {
-    "description": "Single source of truth for the v0.23 dream-cycle synthesize/patterns trusted-workspace allow-list. The cycle's synthesize phase reads this list and threads it as `allowed_slug_prefixes` to every subagent it dispatches; put_page enforces it server-side. Editing this list is the ONLY way to add a new directory the synthesis subagent may write to.",
+    "description": "Single source of truth for the v0.23 dream-cycle synthesize trusted-workspace allow-list. The cycle's synthesize phase reads this list and threads it as `allowed_slug_prefixes` to every subagent it dispatches; put_page enforces it server-side. Editing this list is the ONLY way to add a new directory the synthesis subagent may write to.",
     "globs": [
-      "wiki/personal/reflections/*",
-      "wiki/originals/*",
-      "wiki/personal/patterns/*",
-      "wiki/people/*",
-      "dream-cycle-summaries/*"
+      "reflections/dreams/*",
+      "originals/*"
     ]
+  },
+  "dream_patterns_path": {
+    "description": "Single source of truth for the dream-cycle patterns phase write target. The patterns prompt and its allowed_slug_prefixes are both derived from this entry.",
+    "glob": "learnings/patterns/*",
+    "slug_format": "learnings/patterns/<topic-slug>"
   }
 }

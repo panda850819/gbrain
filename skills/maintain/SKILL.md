@@ -126,8 +126,9 @@ The two new phases consolidate yesterday's conversations into long-term memory:
 **Synthesize phase:** reads transcripts from `dream.synthesize.session_corpus_dir`,
 runs a cheap Haiku verdict (cached in `dream_verdicts`) to filter routine
 ops sessions, then fans out one Sonnet subagent per worth-processing
-transcript. Each subagent writes reflections (`wiki/personal/reflections/...`),
-originals (`wiki/originals/ideas/...`), and people timeline entries. The
+transcript. Each subagent writes reflections (`reflections/dreams/...`) and
+originals (`originals/...`). It may link existing people pages but cannot
+modify or create them. The
 orchestrator collects the slugs from `subagent_tool_executions` (NOT
 `pages.updated_at` — that would pick up unrelated writes) and reverse-renders
 each new page from DB → markdown on disk.
@@ -135,7 +136,7 @@ each new page from DB → markdown on disk.
 **Patterns phase:** runs after `extract` (so the graph state is fresh).
 Reads recent reflections within `dream.patterns.lookback_days` (default 30),
 runs a single Sonnet pass to surface recurring themes, and writes pattern
-pages to `wiki/personal/patterns/<theme>` when ≥`dream.patterns.min_evidence`
+pages to `learnings/patterns/<theme>` when ≥`dream.patterns.min_evidence`
 (default 3) reflections support a pattern.
 
 **Quality bar (Iron Law for synthesis):**
@@ -144,12 +145,13 @@ pages to `wiki/personal/patterns/<theme>` when ≥`dream.patterns.min_evidence`
 3. Slug discipline: lowercase alphanumeric and hyphens only. NO underscores, NO file extensions.
 4. Edited transcripts produce NEW slugs (content-hash suffix changes) — never silently overwrite.
 
-**Trust boundary (`allowed_slug_prefixes`):** the synthesis subagent runs with an
-explicit allow-list of write paths sourced from `_brain-filing-rules.json`'s
-`dream_synthesize_paths.globs`. Even on prompt-injection success, the subagent
-cannot write outside that list. Trust comes from PROTECTED_JOB_NAMES — MCP
-cannot submit subagent jobs at all. Editing the JSON is the only way to add
-a new directory the synthesizer can write to.
+**Trust boundary (`allowed_slug_prefixes`):** each subagent runs with an explicit
+allow-list sourced from `_brain-filing-rules.json`. Synthesize reads
+`dream_synthesize_paths.globs`; patterns derives both its prompt slug and its
+single allowed prefix from `dream_patterns_path`. Even on prompt-injection
+success, neither subagent can write outside its own list. Trust comes from
+PROTECTED_JOB_NAMES — MCP cannot submit subagent jobs at all. Editing the JSON
+is the only way to add a new dream-cycle write directory.
 
 **Idempotency + privacy:** transcripts are keyed by `(file_path, content_hash)`,
 so re-running on the same content is a no-op. `dream.synthesize.exclude_patterns`
