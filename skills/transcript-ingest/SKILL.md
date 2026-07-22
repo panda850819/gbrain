@@ -1,0 +1,125 @@
+---
+name: transcript-ingest
+version: 1.0.0
+description: |
+  Capture AI conversation transcripts from Claude Code / Codex / Hermes jsonl,
+  dedup, gate (signal vs noise with a novelty floor + durability test), and
+  distill SIGNAL sessions into brain-ready domain-routed notes staged for manual
+  filing. Two layers: a cheap deterministic collector (python, zero LLM) and an
+  LLM gate+distill driven by free in-harness subagents. Use when you want past
+  agent conversations turned into durable brain knowledge, or on a cron to keep
+  the brain current with what happened across your AI tools. NOT for human
+  meeting transcripts (use meeting-ingestion) or external media (media-ingest).
+triggers:
+  - "ingest my transcripts"
+  - "drain pending transcripts"
+  - "distill sessions"
+  - "distill my agent conversations"
+  - "capture claude code / codex / hermes sessions"
+  - "capture my claude code / codex / hermes sessions"
+  - "what did I work on across my AI tools"
+  - "transcript ingest"
+tools:
+  - Bash
+  - Agent
+  - Read
+  - Write
+mutating: true
+---
+
+# Transcript Ingest
+
+Turn the firehose of AI agent conversations into curated brain knowledge.
+`raw jsonl (in place) -> collect/dedup -> gate -> distill -> stage -> auto-file (personal: sessions + learnings, via drain cron) / manual file (industry, yei: inbox)`.
+
+## Contract
+
+- Capture sessions from all wired sources (Claude Code, Codex, Hermes) with NO
+  silent caps: sub-agent sidechains and thin sessions are excluded but counted.
+- Dedup is content-hash based and incremental: re-running never reprocesses an
+  unchanged session; a grown session re-queues automatically.
+- The gate admits ONLY durable, newly-CREATED knowledge — never disposable
+  artifacts (dated morning notes, one-off reports) or facts merely injected
+  from the brain (novelty floor + durability test).
+- Staging lives in `brain/.raw/transcript-ingest/` — git-versioned but excluded
+  from gbrain import/embed, so raw working files never enter the brain DB.
+- Two filing tracks (drain cron auto-runs `lib/file_distilled.py`): **personal**
+  SIGNAL auto-files to `brain/sessions/`, and a durable `## Reusable learning`
+  (tagged `learning: pitfall|pattern|architecture`) auto-promotes to a typed
+  `brain/learnings/` page at `confidence: 6`, deduped by `source_key` — no
+  confirm. **industry / yei / dup** stage in `brain/inbox/transcript-ingest/`
+  for manual RESOLVER filing (work-vault is off-limits). The personal brain is
+  kept current automatically; cross-domain entity filing stays human-gated.
+  (NOTE: Phases 4 / Anti-Patterns / Not-Yet-Wired below still describe the older
+  fully-manual model — pre-existing drift from the auto-drain cron, flagged for a
+  separate reconciliation pass.)
+
+## Phases
+
+1. **Collect** (cheap, python, cron-safe).
+   `python3 lib/collect.py`
+   Scans every source glob, excludes sidechains, dedups by sha, drops thin
+   sessions (<200 human chars), writes new/grown sessions to `_queue/<key>.txt`
+   and refreshes `_manifest.json` (all pending, ranked by human chars).
+
+2. **Distill batch** (LLM, free subagents — Mode A).
+   `python3 lib/distill_batch.py [N]` emits a JSON spec of the next N pending
+   workers (session_file + gate/distill prompt paths). For each worker, spawn
+   ONE in-harness Agent (NOT a paid CLI binary) running `prompts/distill_prompt.md`.
+   Each worker gates, then writes a distilled note to `_distilled/<domain>/<key>.md`
+   if SIGNAL, and returns one report line.
+
+3. **Mark** (cheap, python).
+   Pipe all worker report lines to `python3 lib/mark.py` to record verdict +
+   domain and flip state to done, so they never re-gate.
+
+4. **Review + file** (industry / yei only — manual, show-and-confirm; personal SIGNAL + tagged learnings auto-file via the drain cron, see Contract).
+   Read `_distilled/<domain>/*.md`. For each keeper, file into the matching
+   brain via its RESOLVER (personal `brain/`, yei work-vault/yei-brain, industry
+   `industry-db/`). Verify any second-hand number/address/ticker against source
+   before promoting it to an entity-page fact. Then delete or archive the staged note.
+
+## Output Format
+
+- `brain/.raw/transcript-ingest/_queue/<key>.txt` — normalized pending sessions
+- `brain/.raw/transcript-ingest/_distilled/<domain>/<key>.md` — staged notes
+- `brain/.raw/transcript-ingest/state.json` — dedup + verdict ledger
+- `_manifest.json` — pending work list, ranked
+- Per-worker report line: `<key> | SIGNAL|NOISE | <domain> | <path|-> | <why>`
+
+## Operational pitfalls
+
+- `state.json` has multiple writers (`collect.py`, `mark.py`, Claude `SessionEnd`, and launchd drain). Writers must hold a state lock and write JSON atomically via temp file + `os.replace`; direct `json.dump(open(..., "w"))` can leave adjacent-object corruption (`}\n}"claude__..."`) and stall every future collector.
+- In `drain_pending.sh`, commands inside `while read key` inherit the loop stdin. Claude Code must be invoked with `</dev/null`; otherwise the first Claude call consumes the remaining pending keys and the drain silently processes only one item per tick.
+- launchd PATH does not include Homebrew by default on this machine. Transcript drain scripts should export `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` before resolving `claude`, or they can emit `Error: claude not found in PATH` while still appearing to have processed the cap.
+- Distill workers sometimes report an existing brain/session path instead of writing `DISTILLED_DIR/<domain>/<KEY>.md`. `mark.py` must reject SIGNAL reports whose artifact path is missing, and the prompt must require the exact `_distilled` path before reporting SIGNAL.
+
+## Anti-Patterns
+
+- Auto-filing INDUSTRY / YEI notes into entity pages without manual RESOLVER
+  review — those stage in inbox for human filing. (Personal sessions + tagged
+  learnings DO auto-file by design via the drain cron — see Contract.)
+- Promoting a second-hand number/address/ticker from a transcript into an entity
+  page without grepping the source. Assistants fabricate mid-session.
+- Admitting disposable artifacts (today's morning note, a weekly report) as
+  signal just because they contain entity names — they fail the durability test.
+- Counting injected brain context as new signal — it was consumed, not created.
+- Ingesting sub-agent sidechains as standalone sessions — they fragment the
+  parent's signal.
+- Dispatching distill via a paid CLI binary instead of free in-harness subagents.
+
+## Tools Used
+
+- `lib/collect.py` — deterministic scan/dedup/normalize/queue (no LLM)
+- `lib/distill_batch.py` — emit next-N worker dispatch specs (no LLM)
+- `lib/mark.py` — write verdicts back to state (no LLM)
+- `lib/normalize.py` — 3-source jsonl schema unifier
+- `prompts/gate_prompt.md` — signal/noise + domain + novelty + durability
+- `prompts/distill_prompt.md` — per-session gate+distill worker
+- Agent (in-harness subagents) for gate + distill
+- `gbrain put_page` / `capture` only at the manual filing step
+
+## Not Yet Wired
+
+- ChatGPT + Typeless sources (no local jsonl; need export/API into the queue).
+- Industry / yei distilled -> brain filing is manual by design (personal auto-files via the drain cron; an assisted filer for cross-domain could come later).
