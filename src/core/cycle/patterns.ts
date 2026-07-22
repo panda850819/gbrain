@@ -29,7 +29,13 @@ import { serializeMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
 // #2415: allow-list + output-root resolution shared with the synthesize
 // phase — both phases must agree on the configured namespace.
-import { loadAllowedSlugPrefixes, loadOutputRoot } from './synthesize.ts';
+import {
+  loadAllowedSlugPrefixes,
+  loadOutputRoot,
+  loadDreamWriteTargets,
+  defaultDreamWriteTargets,
+  type DreamWriteTargets,
+} from './synthesize.ts';
 import { probeChatModel } from '../ai/gateway.ts';
 import { normalizeModelId } from '../model-id.ts';
 
@@ -115,7 +121,8 @@ export async function runPhasePatterns(
     }
 
     // Gather reflections within lookback window.
-    const reflections = await gatherReflections(engine, config.lookbackDays, config.outputRoot);
+    const writeTargets = await loadDreamWriteTargets(engine, config.outputRoot);
+    const reflections = await gatherReflections(engine, config.lookbackDays, writeTargets);
     if (reflections.length < config.minEvidence) {
       return skipped(
         'insufficient_evidence',
@@ -147,11 +154,15 @@ export async function runPhasePatterns(
       return skipped('no_provider', `pattern detection skipped: ${probe.detail}`);
     }
 
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot);
-    if (allowedSlugPrefixes.length === 0) {
+    // The patterns subagent writes pattern pages only, so its allow-list is
+    // the resolved patterns target rather than the full synthesize union.
+    // loadAllowedSlugPrefixes still gates on the filing-rules file existing.
+    const fileGlobs = await loadAllowedSlugPrefixes(config.outputRoot);
+    if (fileGlobs.length === 0) {
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
     }
+    const patternsAllowList = [`${writeTargets.patterns}/*`];
 
     // #2781: budget the subagent from the REMAINING parent-job time, not
     // the fixed config default. Checked after the cheap gates (disabled /
@@ -168,10 +179,10 @@ export async function runPhasePatterns(
 
     const queue = new MinionQueue(engine);
     const data: SubagentHandlerData = {
-      prompt: buildPatternsPrompt(reflections, config.minEvidence, config.outputRoot),
+      prompt: buildPatternsPrompt(reflections, config.minEvidence, writeTargets),
       model: config.model,
       max_turns: 30,
-      allowed_slug_prefixes: allowedSlugPrefixes,
+      allowed_slug_prefixes: patternsAllowList,
     };
     const submitOpts: Partial<MinionJobInput> = {
       max_stalled: 3,
@@ -328,19 +339,23 @@ interface ReflectionRef {
 async function gatherReflections(
   engine: BrainEngine,
   lookbackDays: number,
-  outputRoot = 'wiki',
+  targets: DreamWriteTargets = defaultDreamWriteTargets('wiki'),
 ): Promise<ReflectionRef[]> {
   const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
-  // #2415: reflections live under the configured output root (bound as a
-  // parameter; outputRoot is slug-grammar-validated by loadOutputRoot).
+  // Reflections live under the configured write target (bound as a parameter;
+  // the root segment is slug-grammar-validated by loadOutputRoot, and declared
+  // targets are normalized by parseDreamWriteTargets).
+  // Soft-deleted pages must not feed pattern detection — a deleted reflection
+  // is not evidence.
   const rows = await engine.executeRaw<{ slug: string; title: string | null; compiled_truth: string | null }>(
     `SELECT slug, title, compiled_truth
        FROM pages
       WHERE slug LIKE $2
+        AND deleted_at IS NULL
         AND updated_at >= $1::timestamptz
       ORDER BY updated_at DESC
       LIMIT 100`,
-    [since, `${outputRoot}/personal/reflections/%`],
+    [since, `${targets.reflections}/%`],
   );
   return rows.map(r => ({
     slug: r.slug,
@@ -351,7 +366,11 @@ async function gatherReflections(
 
 // ── Prompt ────────────────────────────────────────────────────────────
 
-function buildPatternsPrompt(reflections: ReflectionRef[], minEvidence: number, outputRoot = 'wiki'): string {
+function buildPatternsPrompt(
+  reflections: ReflectionRef[],
+  minEvidence: number,
+  targets: DreamWriteTargets = defaultDreamWriteTargets('wiki'),
+): string {
   const today = new Date().toISOString().slice(0, 10);
   const corpus = reflections
     .map((r, i) => `### ${i + 1}. [[${r.slug}]] — ${r.title}\n${r.excerpt}`)
@@ -361,15 +380,15 @@ function buildPatternsPrompt(reflections: ReflectionRef[], minEvidence: number, 
 
 OUTPUT POLICY
 - Only name a pattern if it appears in at least ${minEvidence} DISTINCT reflections.
-- Each pattern page MUST cite the reflections that constitute its evidence (use [[${outputRoot}/personal/reflections/...]] wikilinks).
+- Each pattern page MUST cite the reflections that constitute its evidence (use [[${targets.reflections}/...]] wikilinks).
 - Use \`search\` to check whether a similar pattern page already exists; if yes, update it (use the same slug). If no, create a new one.
-- Pattern slug format: \`${outputRoot}/personal/patterns/<topic-slug>\` (lowercase alphanumeric + hyphens; no underscores, no extension, no date).
+- Pattern slug format: \`${targets.patterns}/<topic-slug>\` (lowercase alphanumeric + hyphens; no underscores, no extension, no date).
 - A "pattern" is a recurring theme, anxiety, decision pattern, relationship dynamic, or self-knowledge motif. NOT a single insight. NOT a list of unrelated topics.
 
 DO NOT WRITE
 - A "patterns from today" digest (that's the dream-cycle-summaries page; not your job).
 - Patterns with <${minEvidence} reflections cited.
-- Anything outside ${outputRoot}/personal/patterns/.
+- Anything outside ${targets.patterns}/.
 
 CONTEXT
 - Today: ${today}

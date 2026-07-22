@@ -10,6 +10,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'fs';
+import { defaultDreamWriteTargets } from '../src/core/cycle/synthesize.ts';
 
 const patternsSrc = readFileSync(
   new URL('../src/core/cycle/patterns.ts', import.meta.url),
@@ -74,13 +75,26 @@ describe('patterns phase wiring', () => {
 });
 
 describe('patterns scope filter', () => {
-  test('filters reflections by slug LIKE <output_root>/personal/reflections/%', () => {
-    // #2415: the namespace root is configurable (dream.synthesize.output_root,
-    // default 'wiki') and bound as a parameter — the scope filter itself and
-    // the reflections sub-path stay pinned.
+  test('filters reflections by a bound slug-prefix parameter', () => {
+    // #2415 made the namespace ROOT configurable; dream_write_targets makes
+    // the whole reflections prefix configurable. What stays pinned: the scope
+    // filter is a BOUND parameter (never interpolated), and the prefix comes
+    // from the resolved write target rather than a literal.
     expect(patternsSrc).toContain('slug LIKE $2');
-    expect(patternsSrc).toContain('/personal/reflections/%');
+    expect(patternsSrc).toContain('`${targets.reflections}/%`');
+    expect(patternsSrc).not.toContain("slug LIKE '");
   });
+
+  test('undeclared targets keep the pre-existing upstream reflection path', () => {
+    // Behavioural guard for the default path the literal used to pin.
+    expect(defaultDreamWriteTargets('wiki').reflections).toBe('wiki/personal/reflections');
+    expect(defaultDreamWriteTargets('notes').reflections).toBe('notes/personal/reflections');
+  });
+
+  // Behavioural coverage for the soft-delete guard and for a configured
+  // write target relocating the gather scope lives in
+  // test/cycle-dream-output-root.test.ts (PGLite-backed). A source-string
+  // grep here would go green on a refactor that dropped the guard.
 
   test('orders by updated_at DESC for recency-bias', () => {
     expect(patternsSrc).toContain('ORDER BY updated_at DESC');

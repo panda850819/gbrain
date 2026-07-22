@@ -28,6 +28,9 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+// Canonical allow-list matcher — the union must agree with the server-side
+// check in put_page, so it reuses that function rather than re-deriving it.
+import { matchesSlugAllowList } from '../operations.ts';
 import { chat as gatewayChat, validateModelId, type ChatResult } from '../ai/gateway.ts';
 import { AIConfigError } from '../ai/errors.ts';
 import { normalizeModelId } from '../model-id.ts';
@@ -420,11 +423,13 @@ export async function runPhaseSynthesize(
 
     // Fan-out: submit one subagent per worth-processing transcript (or one
     // per chunk for transcripts that exceed the model's per-prompt budget).
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot);
-    if (allowedSlugPrefixes.length === 0) {
+    const fileGlobs = await loadAllowedSlugPrefixes(config.outputRoot);
+    if (fileGlobs.length === 0) {
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
     }
+    const writeTargets = await loadDreamWriteTargets(engine, config.outputRoot);
+    const allowedSlugPrefixes = unionAllowList(fileGlobs, writeTargets);
 
     const queue = new MinionQueue(engine);
     const childIds: number[] = [];
@@ -483,7 +488,7 @@ export async function runPhaseSynthesize(
           : config.model;
       for (let i = 0; i < chunks.length; i++) {
         const childData: SubagentHandlerData = {
-          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock, config.outputRoot),
+          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock, writeTargets),
           model: subagentModel,
           max_turns: 30,
           allowed_slug_prefixes: allowedSlugPrefixes,
@@ -787,6 +792,112 @@ export async function loadAllowedSlugPrefixes(outputRoot = 'wiki'): Promise<stri
   return [];
 }
 
+/**
+ * Dream-cycle write targets. `outputRoot` (#2415) remaps only the FIRST slug
+ * segment; a brain whose taxonomy differs deeper than that (e.g. reflections
+ * filed under `reflections/dreams` rather than `<root>/personal/reflections`)
+ * cannot be expressed by it. `dream_write_targets` in
+ * `skills/_brain-filing-rules.json` declares each target explicitly. Absent or
+ * malformed entries fall back to the `outputRoot`-derived defaults, so a brain
+ * that does not declare them keeps the previous behaviour byte-for-byte.
+ */
+export interface DreamWriteTargets {
+  /** Slug prefix for reflection pages, no trailing slash. */
+  reflections: string;
+  /** Slug prefix for original-idea pages, no trailing slash. */
+  originals: string;
+  /** Slug prefix for pattern pages, no trailing slash. */
+  patterns: string;
+}
+
+export function defaultDreamWriteTargets(outputRoot = 'wiki'): DreamWriteTargets {
+  return {
+    reflections: `${outputRoot}/personal/reflections`,
+    originals: `${outputRoot}/originals/ideas`,
+    patterns: `${outputRoot}/personal/patterns`,
+  };
+}
+
+/**
+ * Strip a trailing `/*` or `/` so callers can append their own separator, then
+ * hold the value to the same slug grammar `loadOutputRoot` enforces on
+ * `dream.synthesize.output_root`.
+ *
+ * The validation is load-bearing, not hygiene: the resolved target becomes a
+ * `put_page` allow-list glob for a subagent running on the trusted-workspace
+ * path, and `matchesSlugAllowList` treats `foo/*` as a PREFIX. An unvalidated
+ * `wiki` would widen the patterns subagent from one folder to the whole
+ * namespace. It also reaches a SQL LIKE pattern, where `%` and `_` are
+ * wildcards.
+ */
+export function normalizeDreamTarget(raw: unknown, key = 'target'): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().replace(/\/\*$/, '').replace(/^\/+|\/+$/g, '');
+  if (trimmed.length === 0) return null;
+  if (!SUMMARY_SLUG_RE.test(trimmed)) {
+    process.stderr.write(
+      `[dream] dream.write_targets.${key} "${raw}" is not a valid slug prefix; using the default.\n`,
+    );
+    return null;
+  }
+  return trimmed;
+}
+
+/**
+ * Resolve from brain config. Taxonomy is per-brain state, so it lives in the
+ * `config` table beside `dream.synthesize.output_root` — NOT in the shipped
+ * `skills/_brain-filing-rules.json`, which is an upstream default that every
+ * install shares. A brain that sets nothing keeps upstream behaviour exactly.
+ */
+export async function loadDreamWriteTargets(
+  engine: Pick<BrainEngine, 'getConfig'>,
+  outputRoot = 'wiki',
+): Promise<DreamWriteTargets> {
+  const defaults = defaultDreamWriteTargets(outputRoot);
+  const read = async (key: string, fallback: string): Promise<string> => {
+    const raw = await engine.getConfig(`dream.write_targets.${key}`).catch(() => null);
+    const value = normalizeDreamTarget(raw, key);
+    if (value === null) return fallback;
+    // `wiki` is grammatically valid but is the namespace ROOT — as an
+    // allow-list glob it reads `wiki/*`, i.e. write access to everything.
+    // Plausible as a typo because the sibling key `dream.synthesize.output_root`
+    // takes exactly that value. A deeper target (`originals`) stays legal.
+    if (value === outputRoot) {
+      process.stderr.write(
+        `[dream] dream.write_targets.${key} "${value}" is the output root; that would allow ` +
+        `writes anywhere under it. Using the default.\n`,
+      );
+      return fallback;
+    }
+    return value;
+  };
+  return {
+    reflections: await read('reflections', defaults.reflections),
+    originals: await read('originals', defaults.originals),
+    patterns: await read('patterns', defaults.patterns),
+  };
+}
+
+/**
+ * Allow-list the dream subagents run under: the static filing-rule globs plus
+ * whatever the resolved write targets point at. The union keeps the shipped
+ * defaults valid while letting a brain-configured taxonomy write to its own
+ * paths without editing the shipped file.
+ */
+export function unionAllowList(fileGlobs: string[], targets: DreamWriteTargets): string[] {
+  const out = [...fileGlobs];
+  for (const target of [targets.reflections, targets.originals, targets.patterns]) {
+    // Skip a target an existing glob already covers. Without this, the default
+    // `wiki/originals/ideas` would append a glob subsumed by the shipped
+    // `wiki/originals/*` — no new write access, but the allow-list the model
+    // is shown would differ from upstream for an unconfigured brain.
+    if (matchesSlugAllowList(target, out)) continue;
+    const glob = `${target}/*`;
+    if (!out.includes(glob)) out.push(glob);
+  }
+  return out;
+}
+
 // ── Significance judge (gateway-routed; provider-agnostic) ──────────────
 //
 // The JudgeClient interface is unchanged for test-seam stability — existing
@@ -1028,7 +1139,7 @@ function buildSynthesisPrompt(
   chunkIdx: number,
   chunkTotal: number,
   priorContradictionsBlock = '',
-  outputRoot = 'wiki',
+  targets: DreamWriteTargets = defaultDreamWriteTargets('wiki'),
 ): string {
   const dateHint = t.inferredDate ?? today();
   const baseSlugSegment = sanitizeForSlug(t.basename) || `session-${dateHint}`;
@@ -1057,10 +1168,10 @@ OUTPUT POLICY (ALL of these are required)
 
 TASKS
 A. Reflections (self-knowledge, pattern recognition, emotional processing):
-   slug: \`${outputRoot}/personal/reflections/${dateHint}-<topic-slug>-${hashSuffix}\`
+   slug: \`${targets.reflections}/${dateHint}-<topic-slug>-${hashSuffix}\`
 
 B. Originals (new ideas, frames, theses, mental models):
-   slug: \`${outputRoot}/originals/ideas/${dateHint}-<idea-slug>-${hashSuffix}\`
+   slug: \`${targets.originals}/${dateHint}-<idea-slug>-${hashSuffix}\`
 
 C. People mentions: search first; if a page exists, do not put_page over it (the orchestrator handles people enrichment via timeline entries — your job is the reflection/original synthesis, NOT modifying existing person pages).
 

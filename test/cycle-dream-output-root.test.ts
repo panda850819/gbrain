@@ -14,7 +14,12 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { __testing, loadAllowedSlugPrefixes, loadOutputRoot } from '../src/core/cycle/synthesize.ts';
+import {
+  __testing,
+  loadAllowedSlugPrefixes,
+  loadOutputRoot,
+  defaultDreamWriteTargets,
+} from '../src/core/cycle/synthesize.ts';
 import { runPhasePatterns } from '../src/core/cycle/patterns.ts';
 import type { DiscoveredTranscript } from '../src/core/cycle/transcript-discovery.ts';
 
@@ -36,7 +41,7 @@ describe('#2415: buildSynthesisPrompt output root', () => {
   });
 
   test('custom root replaces wiki/ in both slug templates', () => {
-    const prompt = buildSynthesisPrompt(transcript, 'chunk', 0, 1, '', 'notes');
+    const prompt = buildSynthesisPrompt(transcript, 'chunk', 0, 1, '', defaultDreamWriteTargets('notes'));
     expect(prompt).toContain('notes/personal/reflections/2026-07-17-');
     expect(prompt).toContain('notes/originals/ideas/2026-07-17-');
     expect(prompt).not.toContain('wiki/personal/reflections/');
@@ -108,5 +113,38 @@ describe('#2415: loadOutputRoot validation + patterns gather scope', () => {
     const result = await runPhasePatterns(engine, { brainDir: '/tmp', dryRun: true });
     expect(result.status).toBe('ok');
     expect(result.details?.reflections_considered).toBe(3);
+  });
+
+  test('a configured write target relocates the gather scope', async () => {
+    await engine.setConfig('dream.synthesize.output_root', 'notes');
+    await engine.setConfig('dream.write_targets.reflections', 'reflections/dreams');
+    for (let i = 0; i < 3; i++) {
+      await engine.putPage(`reflections/dreams/2026-07-18-c${i}`, {
+        type: 'note', title: `C${i}`, compiled_truth: `configured ${i}`,
+        timeline: '', frontmatter: {},
+      });
+    }
+    const result = await runPhasePatterns(engine, { brainDir: '/tmp', dryRun: true });
+    expect(result.status).toBe('ok');
+    // Only the 3 configured-target pages; the notes/-rooted set from the
+    // previous test must no longer be in scope.
+    expect(result.details?.reflections_considered).toBe(3);
+    await engine.setConfig('dream.write_targets.reflections', '');
+  });
+
+  test('soft-deleted reflections are not evidence', async () => {
+    await engine.setConfig('dream.synthesize.output_root', 'notes');
+    const doomed = 'notes/personal/reflections/2026-07-19-deleted';
+    await engine.putPage(doomed, {
+      type: 'note', title: 'Deleted', compiled_truth: 'should not count',
+      timeline: '', frontmatter: {},
+    });
+    const before = await runPhasePatterns(engine, { brainDir: '/tmp', dryRun: true });
+    const withDeleted = before.details?.reflections_considered as number;
+
+    await engine.executeRaw(`UPDATE pages SET deleted_at = now() WHERE slug = $1`, [doomed]);
+
+    const after = await runPhasePatterns(engine, { brainDir: '/tmp', dryRun: true });
+    expect(after.details?.reflections_considered).toBe(withDeleted - 1);
   });
 });
