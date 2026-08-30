@@ -229,38 +229,36 @@ export class MinionQueue {
     if (jobName === 'subagent' && data && typeof data === 'object') {
       const submittedModel = (data as { model?: unknown }).model;
       if (typeof submittedModel === 'string' && submittedModel.length > 0) {
-        const { classifyCapabilities } = await import('../ai/capabilities.ts');
-        const verdict = classifyCapabilities(submittedModel);
-        if (verdict === 'unusable:no_tools') {
-          throw new Error(
-            `subagent job rejected: data.model "${submittedModel}" lacks native tool calling. ` +
-            `The subagent loop dispatches brain ops via tool calls — without tool support the loop has no way to run. ` +
-            `Pick a provider that supports tools (anthropic, openai, google, litellm, deepseek, groq, together, azure-openai).`,
-          );
+        const { isRuntimeConfigured } = await import('../ai/gateway.ts');
+        if (!isRuntimeConfigured()) {
+          const { classifyCapabilities } = await import('../ai/capabilities.ts');
+          const verdict = classifyCapabilities(submittedModel);
+          if (verdict === 'unusable:no_tools') {
+            throw new Error(
+              `subagent job rejected: data.model "${submittedModel}" lacks native tool calling. ` +
+              `The subagent loop dispatches brain ops via tool calls — without tool support the loop has no way to run. ` +
+              `Pick a provider that supports tools (anthropic, openai, google, litellm, deepseek, groq, together, azure-openai).`,
+            );
+          }
+          if (verdict === 'unusable:no_subagent_loop') {
+            throw new Error(
+              `subagent job rejected: data.model "${submittedModel}" comes from a provider whose recipe declares ` +
+              `supports_subagent_loop: false — its tool_call_ids are not stable enough across crashes/replays ` +
+              `to drive the subagent loop. ` +
+              `Pick a provider whose recipe declares supports_subagent_loop: true (e.g. anthropic, openai, google, deepseek, groq).`,
+            );
+          }
+          if (verdict === 'unknown') {
+            const { listRecipes } = await import('../ai/recipes/index.ts');
+            const known = listRecipes().map((r) => r.id).join(', ');
+            throw new Error(
+              `subagent job rejected: data.model "${submittedModel}" references an unknown provider. ` +
+              `Use format provider:model where provider matches a recipe in src/core/ai/recipes/. ` +
+              `Known providers: ${known}.`,
+            );
+          }
+          // Degraded verdicts pass through; the gateway emits the warning.
         }
-        if (verdict === 'unusable:no_subagent_loop') {
-          throw new Error(
-            `subagent job rejected: data.model "${submittedModel}" comes from a provider whose recipe declares ` +
-            `supports_subagent_loop: false — its tool_call_ids are not stable enough across crashes/replays ` +
-            `to drive the subagent loop. ` +
-            `Pick a provider whose recipe declares supports_subagent_loop: true (e.g. anthropic, openai, google, deepseek, groq).`,
-          );
-        }
-        if (verdict === 'unknown') {
-          // v0.46.3: derive the provider list from the recipe registry instead
-          // of a hardcoded string (which drifted silently as recipes came and
-          // went — and would have needed editing again at the ZE removal).
-          const { listRecipes } = await import('../ai/recipes/index.ts');
-          const known = listRecipes().map((r) => r.id).join(', ');
-          throw new Error(
-            `subagent job rejected: data.model "${submittedModel}" references an unknown provider. ` +
-            `Use format provider:model where provider matches a recipe in src/core/ai/recipes/. ` +
-            `Known providers: ${known}.`,
-          );
-        }
-        // 'degraded:no_caching' and 'degraded:no_parallel' pass through — the
-        // gateway prints a once-per-(source, model) cost warning at first
-        // dispatch. 'ok' passes through silently.
       }
     }
     await this.ensureSchema();

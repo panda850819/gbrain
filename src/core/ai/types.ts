@@ -8,6 +8,8 @@
  * both a recipe AND a code change to register the factory in gateway.ts.
  */
 
+import type { RuntimeConfig } from './runtime.ts';
+
 export type TouchpointKind =
   | 'embedding'
   | 'expansion'
@@ -525,6 +527,8 @@ export interface AIGatewayConfig {
   base_urls?: Record<string, string>;
   /** Optional chat providerOptions overrides keyed by recipe id or "recipe:modelId". */
   provider_chat_options?: Record<string, Record<string, unknown>>;
+  /** External runtime adapter configuration. File/env plane only; provider keys stay out of GBrain. */
+  runtime?: RuntimeConfig;
   /** Env snapshot read once at configuration time. Gateway never reads process.env at call time. */
   env: Record<string, string | undefined>;
 }

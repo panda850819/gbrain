@@ -52,8 +52,16 @@ import { resolveModel, isAnthropicProvider, isOpenRouterAnthropic, TIER_DEFAULTS
 import { splitProviderModelId, normalizeModelId } from '../../model-id.ts';
 import { resolveAnthropicKey } from '../../ai/anthropic-key.ts';
 import { buildSystemPrompt, DEFAULT_SUBAGENT_SYSTEM } from '../system-prompt.ts';
-import { toolLoop as gatewayToolLoop, isThinkingByDefaultModel, THINKING_MODEL_MAX_OUTPUT_TOKENS } from '../../ai/gateway.ts';
+import {
+  toolLoop as gatewayToolLoop,
+  hasRuntimeCapability,
+  invokeRuntimeOperation,
+  isRuntimeConfigured,
+  isThinkingByDefaultModel,
+  THINKING_MODEL_MAX_OUTPUT_TOKENS,
+} from '../../ai/gateway.ts';
 import type { ChatToolDef, ChatMessage, ChatBlock, ChatResult, ToolHandler } from '../../ai/gateway.ts';
+import { matchesSlugAllowList } from '../../operations.ts';
 import { classifyCapabilities } from '../../ai/capabilities.ts';
 import { runSubagentOneshot, ONESHOT_TOOL_USE_ID_PREFIX } from './subagent-oneshot.ts';
 import type { OneshotFallbackReason } from '../types.ts';
@@ -247,17 +255,11 @@ function replayTerminalStopReason(
 
 export function makeSubagentHandler(deps: SubagentDeps) {
   const engine = deps.engine;
-  // sdk.messages IS the MessagesClient-shaped object. The v0.16.0 bug was
-  // casting new Anthropic() (top level) to MessagesClient, but .create()
-  // lives at sdk.messages.create. Assigning sdk.messages directly gets the
-  // right object; JS method-call semantics preserve `this` at the call
-  // site (subagent.ts invokes client.create(...) with client === sdk.messages).
-  // Resolve the key env-first, then config (anthropic_api_key) — a bare
-  // new Anthropic() only reads env, so launchd/MCP workers whose key lives
-  // in the gbrain config file would fail auth (#2048).
-  const makeAnthropic = deps.makeAnthropic ?? (() => new Anthropic({ apiKey: resolveAnthropicKey() }));
-  const client: MessagesClient = deps.client ?? makeAnthropic().messages;
   const config = deps.config ?? loadConfig() ?? ({ engine: 'postgres' } as GBrainConfig);
+  const runtimeConfigured = isRuntimeConfigured();
+  // Construct the Anthropic client lazily so runtime mode never touches the SDK.
+  const makeAnthropic = deps.makeAnthropic ?? (() => new Anthropic({ apiKey: resolveAnthropicKey() }));
+  let client: MessagesClient | undefined = deps.client;
   const rateLeaseKey = deps.rateLeaseKey ?? DEFAULT_RATE_KEY;
   const maxConcurrent = deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const leaseTtlMs = deps.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
@@ -333,6 +335,27 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     // Default is the legacy path so v0.38 patch releases ship the same
     // behavior as v0.37. Users dogfood the gateway path by flipping the flag.
     //
+    // Defense in depth for direct or queue-bypassing native submissions.
+    if (data.model && !runtimeConfigured) {
+      const verdict = classifyCapabilities(data.model);
+      if (verdict === 'unusable:no_tools') {
+        throw new Error(
+          `subagent job rejected: data.model "${data.model}" lacks native tool calling. ` +
+          `The subagent loop dispatches brain ops via tool calls — without tool support the loop has no way to run.`,
+        );
+      }
+      if (verdict === 'unusable:no_subagent_loop') {
+        throw new Error(
+          `subagent job rejected: data.model "${data.model}" does not support a replay-stable subagent loop.`,
+        );
+      }
+      if (verdict === 'unknown') {
+        throw new Error(
+          `subagent job rejected: data.model "${data.model}" references an unknown provider. ` +
+          `Use format provider:model where provider matches a recipe in src/core/ai/recipes/.`,
+        );
+      }
+    }
     const model = data.model
       ?? await resolveModel(engine, {
         tier: 'subagent',
@@ -434,13 +457,11 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     // provider in src/core/ai/recipes/). When OFF, route through the legacy
     // Anthropic-direct path AND refuse non-Anthropic models loudly.
     const useGatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
-    // #2753: share the doctor's truthiness set. Before this, the doctor accepted
-    // yes/on but the worker did not, so `config set ... yes` reported healthy
-    // here and still refused the job below.
-    // OpenRouter Anthropic is not `isAnthropicProvider` (the Messages SDK
-    // cannot speak OR). Auto-enable the gateway loop so the legacy pin
-    // does not refuse `openrouter:anthropic/…` when the flag is off.
-    const useGatewayLoop = isConfigTruthy(useGatewayLoopRaw) || isOpenRouterAnthropic(model);
+    // External runtime forces the provider-neutral path; otherwise preserve
+    // upstream truthiness and OpenRouter-Anthropic handling.
+    const useGatewayLoop = runtimeConfigured
+      || isConfigTruthy(useGatewayLoopRaw)
+      || isOpenRouterAnthropic(model);
     if (!useGatewayLoop && !isAnthropicProvider(model)) {
       throw new Error(
         `subagent job: resolved model "${model}" is non-Anthropic but agent.use_gateway_loop is not enabled. ` +
@@ -448,6 +469,12 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         `\`gbrain config set agent.use_gateway_loop true\`. ` +
         `Or use an Anthropic model (e.g. anthropic:claude-sonnet-4-6).`,
       );
+    }
+
+    if (!useGatewayLoop) {
+      // sdk.messages is the MessagesClient-shaped object. Keep the legacy SDK
+      // construction entirely out of runtime mode.
+      client = deps.client ?? makeAnthropic().messages;
     }
 
     // Build the tool registry bound to THIS job as the owning subagent.
@@ -484,6 +511,24 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       tools_count: toolDefs.length,
       allowed_tools: toolDefs.map(t => t.name),
     });
+
+    // A runtime that owns the full agent/tool loop gets the whole job. A
+    // chat-only runtime still uses GBrain's provider-neutral loop below.
+    if (runtimeConfigured && hasRuntimeCapability('subagent')) {
+      return await runSubagentViaRuntime({
+        engine,
+        ctx,
+        data,
+        model,
+        systemPrompt,
+        toolDefs,
+        maxTurns,
+        maxOutputTokens,
+        leaseKey: rateLeaseKey,
+        maxConcurrent,
+        leaseTtlMs,
+      });
+    }
 
     // OV-10: provider-derived lease key. Anthropic-family models keep the
     // legacy 'anthropic:messages' bucket (one shared ceiling per API, not
@@ -884,7 +929,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         };
 
         const combinedSignal = mergeSignals(mergeSignals(ctx.signal, ctx.shutdownSignal), leaseLost.signal);
-        assistantMsg = await client.create(params, { signal: combinedSignal });
+        assistantMsg = await client!.create(params, { signal: combinedSignal });
       } catch (err) {
         // Release lease eagerly on error so we don't starve capacity.
         clearInterval(leaseRenewTimer);
@@ -1144,6 +1189,143 @@ interface GatewayRunArgs {
   leaseTtlMs: number;
 }
 
+function isRuntimeRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function runtimeStringList(value: unknown, key: 'artifacts' | 'writes'): string[] {
+  if (!isRuntimeRecord(value) || value[key] === undefined) return [];
+  const raw = value[key];
+  if (!Array.isArray(raw) || raw.some(item => typeof item !== 'string' || item.length === 0)) {
+    throw new Error(`Runtime subagent ${key} must be an array of non-empty strings.`);
+  }
+  return raw as string[];
+}
+
+async function verifyRuntimeWrites(
+  engine: BrainEngine,
+  writes: readonly string[],
+  metadata: { write_policy?: { allow?: string[] } },
+  sourceId?: string,
+): Promise<void> {
+  if (writes.length === 0) return;
+  const allow = metadata.write_policy?.allow ?? [];
+  if (allow.length === 0) {
+    throw new Error('Runtime subagent reported writes without a write_policy allow-list.');
+  }
+  const outsidePolicy = writes.find(slug => !matchesSlugAllowList(slug, allow));
+  if (outsidePolicy) {
+    throw new Error(`Runtime subagent reported write outside write_policy.allow: ${outsidePolicy}`);
+  }
+  const missing: string[] = [];
+  for (const slug of new Set(writes)) {
+    const page = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
+    if (!page) missing.push(slug);
+  }
+  if (missing.length > 0) {
+    throw new Error(`Runtime subagent reported writes that were not readable after completion: ${missing.join(', ')}`);
+  }
+}
+
+function runtimeSubagentResult(value: unknown): Omit<SubagentResult, 'runtime'> {
+  if (!isRuntimeRecord(value) || typeof value.result !== 'string') {
+    throw new Error('Runtime subagent result must contain a string result.');
+  }
+  const rawStop = value.stop_reason;
+  const stopReason = rawStop === 'end' ? 'end_turn' : rawStop;
+  const allowedStops = new Set(['end_turn', 'max_turns', 'max_tokens', 'refusal', 'error']);
+  if (typeof stopReason !== 'string' || !allowedStops.has(stopReason)) {
+    throw new Error('Runtime subagent result has an invalid stop_reason.');
+  }
+  const tokens = isRuntimeRecord(value.tokens) ? value.tokens : {};
+  const numberOrZero = (raw: unknown) => typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
+  const result: Omit<SubagentResult, 'runtime'> = {
+    result: value.result,
+    turns_count: numberOrZero(value.turns_count),
+    stop_reason: stopReason as SubagentResult['stop_reason'],
+    tokens: {
+      in: numberOrZero(tokens.in),
+      out: numberOrZero(tokens.out),
+      cache_read: numberOrZero(tokens.cache_read),
+      cache_create: numberOrZero(tokens.cache_create),
+    },
+  };
+  return result;
+}
+
+/**
+ * Run a whole subagent through the configured external runtime. The runtime
+ * owns its agent loop and tool calls; GBrain receives only the structured
+ * result and receipt. This is the key path for a runtime with its own MCP
+ * client, such as Hermes.
+ */
+async function runSubagentViaRuntime(args: GatewayRunArgs): Promise<SubagentResult> {
+  const { engine, ctx, data, model, systemPrompt, toolDefs, maxTurns, maxOutputTokens } = args;
+  const signal = mergeSignals(ctx.signal, ctx.shutdownSignal);
+  const startedAt = Date.now();
+  logSubagentHeartbeat({ job_id: ctx.id, event: 'llm_call_started', turn_idx: 0 });
+  const runtimeMetadata = data.runtime_metadata ?? {
+    run_id: `subagent:${ctx.id}`,
+    phase: 'subagent',
+    idempotency_key: `subagent:${ctx.id}`,
+    write_policy: data.allowed_slug_prefixes
+      ? { mode: 'canonical' as const, allow: data.allowed_slug_prefixes }
+      : { mode: 'none' as const, allow: [] },
+    ...(ctx.deadlineAtMs !== null ? { deadline_at_ms: ctx.deadlineAtMs } : {}),
+  };
+  const response = await invokeRuntimeOperation(
+    'subagent',
+    {
+      job_id: ctx.id,
+      prompt: data.prompt,
+      system: systemPrompt,
+      model,
+      max_turns: maxTurns,
+      max_tokens: maxOutputTokens,
+      tools: toolDefs.map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema,
+      })),
+      ...(data.source_id ? { source_id: data.source_id } : {}),
+      ...(data.allowed_slug_prefixes ? { allowed_slug_prefixes: data.allowed_slug_prefixes } : {}),
+    },
+    model,
+    signal,
+    runtimeMetadata,
+  );
+  const artifacts = runtimeStringList(response.result, 'artifacts');
+  const writes = runtimeStringList(response.result, 'writes');
+  await verifyRuntimeWrites(engine, writes, runtimeMetadata, data.source_id);
+  const result = runtimeSubagentResult(response.result);
+  await ctx.updateTokens({
+    input: result.tokens.in,
+    output: result.tokens.out,
+    cache_read: result.tokens.cache_read,
+  });
+  logSubagentHeartbeat({
+    job_id: ctx.id,
+    event: 'llm_call_completed',
+    turn_idx: 0,
+    ms_elapsed: Date.now() - startedAt,
+    tokens: {
+      in: result.tokens.in,
+      out: result.tokens.out,
+      cache_read: result.tokens.cache_read,
+      cache_create: result.tokens.cache_create,
+    },
+  });
+  return {
+    ...result,
+    runtime: {
+      request_id: response.request_id,
+      ...(artifacts.length > 0 ? { artifacts } : {}),
+      ...(writes.length > 0 ? { writes } : {}),
+      ...(response.usage ? { usage: response.usage as Record<string, unknown> } : {}),
+    },
+  };
+}
+
 /**
  * v0.38 S1.5 — provider-agnostic subagent loop via `gateway.toolLoop()`.
  *
@@ -1337,6 +1519,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
         signal: leaseLost.signal,
       };
     },
+    runtimeMetadata: data.runtime_metadata,
     // ALWAYS pass replayState (even on fresh runs) so the gateway loop's
     // messageIdx counter starts at `nextMessageIdx` (1 on fresh, after the
     // seed user write above). Without this, the loop defaults to messageIdx=0

@@ -1259,9 +1259,11 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         // the handful of hosted-key config values so the resolveKey closure
         // passed to embeddingProviderConfigured() can stay synchronous.
         let embeddingModel: string | undefined;
+        let runtimeChatAvailable = false;
         try {
           const gw = await import('../core/ai/gateway.ts');
           embeddingModel = gw.getEmbeddingModel();
+          runtimeChatAvailable = gw.isRuntimeConfigured() && gw.hasRuntimeCapability('chat');
         } catch {
           embeddingModel = (await engine.getConfig('embedding_model')) ?? undefined;
         }
@@ -1288,10 +1290,9 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           }),
           // #3944: env + FILE plane via the shared helper — the same probe
           // doctor's loadRecommendationContext uses. Reading the DB plane
-          // here (engine.getConfig) reported a chat key "configured" that
-          // doctor's planner (file plane, per the #2662 rule above) said was
-          // missing, so autopilot dispatched chat jobs doctor called blocked.
-          hasChatApiKey: chatApiKeyConfigured(fileCfg),
+          // here reported keys the gateway could not use. A configured chat
+          // runtime is an equivalent provider-independent capability.
+          hasChatApiKey: runtimeChatAvailable || chatApiKeyConfigured(fileCfg),
         };
         // v0.41.18.0 (A5 + A19 + A22, T15): consult onboard recommendations
         // ALONGSIDE doctor's brain-score recommendations. Onboard's 4 new

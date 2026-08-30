@@ -43,7 +43,13 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { chat as gatewayChat, validateModelId, type ChatResult } from '../ai/gateway.ts';
+import {
+  chat as gatewayChat,
+  hasRuntimeCapability,
+  isRuntimeConfigured,
+  validateModelId,
+  type ChatResult,
+} from '../ai/gateway.ts';
 import { AIConfigError } from '../ai/errors.ts';
 import { resolveChatContextTokens } from '../ai/model-resolver.ts';
 import { normalizeModelId, splitProviderModelId } from '../model-id.ts';
@@ -328,6 +334,8 @@ export interface SynthesizePhaseOpts {
   sourceId?: string;
   /** Internal: minion owner job id for private dream-inline queue recovery. */
   privateQueueOwnerJobId?: number | null;
+  /** Stable cycle id forwarded to external runtime jobs. */
+  runId?: string;
   /**
    * issue #2860 — `gbrain dream --phase synthesize --once`. Bypasses the
    * `dream.synthesize.enabled` gate for THIS call only (does NOT bypass
@@ -734,46 +742,15 @@ export async function runPhaseSynthesize(
       // and must not be cancelled.
       const transcriptFreshIds: number[] = [];
       for (let i = 0; i < chunks.length; i++) {
-        const childData: SubagentHandlerData = {
-          prompt: buildSynthesisPrompt(
-            t, chunks[i], i, chunks.length, priorContradictionsBlock, config.outputRoot,
-            buildTriageMapBlock(triageVerdict, chunks[i], chunks.length),
-            manifestBlock,
-            allowedSlugPrefixes,
-            // #4117: validated per-lane namespaces.
-            config.reflectionsPrefix,
-            config.originalsPrefix,
-          ),
-          model: subagentModel,
-          max_turns: config.maxTurns,
-          allowed_slug_prefixes: allowedSlugPrefixes,
-          // #4216: execution mode + the structural slug-suffix contract
-          // (CDX-9) + #4217 write requirement — a synthesis child whose every
-          // write failed must dead-letter, not report completed.
-          mode: config.mode,
-          oneshot_slug_suffix: chunks.length > 1
-            ? `${t.contentHash.slice(0, 6)}-c${i}`
-            : t.contentHash.slice(0, 6),
-          require_writes: true,
-          // #1586: scope every child tool call to the cycle's resolved source
-          // so put_page writes land there instead of the hardcoded 'default'.
-          ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
-        };
-        // Keep producer identity stable when the corpus root moves. Source and
-        // complete filename remain explicit so equal bytes in different source
-        // or filename namespaces do not collide.
+        // Stable producer identity across corpus moves and chunking.
         const synthesisKey =
           `dream:synth-v2:${encodeURIComponent(opts.sourceId ?? 'default')}` +
           `:filename:${encodeURIComponent(basename(t.filePath))}:${hash16}`;
         const idempotency_key = isChunked
           ? `${synthesisKey}:c${i}of${chunks.length}`
           : synthesisKey;
-        // #4168 red-team: the phase is a FAN-OUT and children drain
-        // sequentially with claim-time-anchored kill switches, so a single
-        // phase-start clamp only bounds the FIRST child. Re-clamp against the
-        // live clock per submit; when the remaining parent budget drops under
-        // the minimum, stop submitting — deferred transcripts retry next
-        // cycle (partial > guaranteed-timeout children).
+
+        // Re-clamp each child against the remaining parent budget.
         const perChild = clampSubagentBudgets(
           { subagentTimeoutMs: config.subagentTimeoutMs, subagentWaitTimeoutMs: config.subagentWaitTimeoutMs },
           opts.deadlineAtMs,
@@ -783,6 +760,33 @@ export async function runPhaseSynthesize(
           budgetExhaustedDeferrals.push(basename(t.filePath));
           break;
         }
+
+        const childData: SubagentHandlerData = {
+          prompt: buildSynthesisPrompt(
+            t, chunks[i], i, chunks.length, priorContradictionsBlock, config.outputRoot,
+            buildTriageMapBlock(triageVerdict, chunks[i], chunks.length),
+            manifestBlock,
+            allowedSlugPrefixes,
+            config.reflectionsPrefix,
+            config.originalsPrefix,
+          ),
+          model: subagentModel,
+          max_turns: config.maxTurns,
+          allowed_slug_prefixes: allowedSlugPrefixes,
+          mode: config.mode,
+          oneshot_slug_suffix: chunks.length > 1
+            ? `${t.contentHash.slice(0, 6)}-c${i}`
+            : t.contentHash.slice(0, 6),
+          require_writes: true,
+          ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
+          runtime_metadata: {
+            run_id: opts.runId ?? `synthesize:${t.filePath}:${hash16}`,
+            phase: 'synthesize',
+            idempotency_key,
+            write_policy: { mode: 'canonical', allow: allowedSlugPrefixes },
+            ...(opts.deadlineAtMs != null ? { deadline_at_ms: opts.deadlineAtMs } : {}),
+          },
+        };
         const submitOpts: Partial<MinionJobInput> = {
           max_stalled: 3,
           on_child_fail: 'continue',
@@ -1580,21 +1584,17 @@ export function makeJudgeClient(verdictModel: string): JudgeClient | null {
   // Normalize: ensure provider:model shape (and slash→colon — #1698). resolveModel
   // returns bare anthropic ids (e.g. `claude-haiku-4-5`); gateway.chat needs `anthropic:...`.
   const modelStr = normalizeModelId(verdictModel);
+  let nativeProviderId: string | null = null;
 
-  // #1698 (C1): id-validity via the shared `validateModelId` core (resolveRecipe +
-  // assertTouchpoint) — catches unknown provider AND chat-less provider (model-id
-  // typos pass locally and fail at the provider; no runtime allowlist). We do NOT
-  // use the full `probeChatModel` here: its `isAvailable` layer would reject
-  // non-Anthropic-no-key providers and an unconfigured gateway, breaking the
-  // deliberate per-transcript-degrade contract (and test A9). validateModelId reads
-  // the recipe registry, not gateway _config, so it works pre-configureGateway().
-  const v = validateModelId(modelStr);
-  if (!v.ok) return null;
-
-  // Anthropic key probe (legacy behavior preserved verbatim). Other providers' key
-  // checks happen lazily at chat call time and surface as AIConfigError, which the
-  // verdict loop catches per-transcript.
-  if (v.parsed.providerId === 'anthropic' && !hasAnthropicKey()) return null;
+  if (isRuntimeConfigured()) {
+    if (!hasRuntimeCapability('chat')) return null;
+  } else {
+    // Native mode validates the recipe/model and keeps the cheap Anthropic-key gate.
+    const v = validateModelId(modelStr);
+    if (!v.ok) return null;
+    nativeProviderId = v.parsed.providerId;
+    if (nativeProviderId === 'anthropic' && !hasAnthropicKey()) return null;
+  }
 
   return {
     create: async (params, options): Promise<Anthropic.Message> => {
@@ -1629,7 +1629,7 @@ export function makeJudgeClient(verdictModel: string): JudgeClient | null {
         // wants only the small JSON verdict, so pin thinking off per-call —
         // the openai-compatible adapter spreads providerOptions[recipe.id]
         // into the wire body, where `thinking` is DeepSeek's documented knob.
-        ...(v.parsed.providerId === 'deepseek'
+        ...(nativeProviderId === 'deepseek'
           ? { providerOptions: { deepseek: { thinking: { type: 'disabled' } } } }
           : {}),
         // #4077: a cancelled cycle tears down the in-flight judge call too.

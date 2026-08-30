@@ -135,6 +135,10 @@ NOTES
   src/core/ai/recipes/ qualifies. A model that cannot call tools, or whose
   tool_call_ids are not replay-stable, is refused at job start with the
   reason named.
+
+  When an external runtime is configured, it owns authentication and may run
+  the whole subagent operation or each provider-neutral gateway turn. Missing
+  runtime capabilities fail explicitly and never fall back to a native provider.
 `);
 }
 

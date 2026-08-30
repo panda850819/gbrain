@@ -104,6 +104,7 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
     chat_fallback_chain: c.chat_fallback_chain,
     base_urls: { ...envBaseUrls, ...(c.provider_base_urls ?? {}) }, // config wins over env
     provider_chat_options: c.provider_chat_options,
+    runtime: c.runtime,
     // #1249 empty-string drop + GEMINI alias applied inside mergedProviderEnv.
     // #3350 file-plane native base-URL fold layered on top (env wins).
     env: foldNativeBaseUrlsFromFilePlane(fileCfg, mergedProviderEnv(c, process.env)),

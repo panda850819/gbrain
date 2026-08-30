@@ -25,6 +25,7 @@
     "./search/expansion": "./src/core/search/expansion.ts",
     "./think": "./src/core/think/index.ts",
     "./ai/gateway": "./src/core/ai/gateway.ts",
+    "./ai/runtime": "./src/core/ai/runtime.ts",
     "./extract": "./src/commands/extract.ts",
     "./ingestion": "./src/core/ingestion/index.ts",
     "./ingestion/test-harness": "./src/core/ingestion/test-harness.ts",

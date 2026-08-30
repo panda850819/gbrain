@@ -44,6 +44,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, statSync, realpathSync } from 'fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'path';
 import { gbrainPath } from './config.ts';
 import type { BrainEngine } from './engine.ts';
@@ -451,6 +452,8 @@ export interface CycleReport {
 export interface CycleOpts {
   /** If true, no writes to filesystem or DB. All phases honor this. */
   dryRun?: boolean;
+  /** Stable caller-provided cycle identifier for runtime handoffs. */
+  runId?: string;
   /** Defaults to ALL_PHASES. Pass a subset for --phase lint etc. */
   phases?: CyclePhase[];
   /**
@@ -1865,6 +1868,7 @@ export async function runCycle(
   const dryRun = !!opts.dryRun;
   const pull = !!opts.pull;
   const timestamp = new Date().toISOString();
+  const runId = opts.runId ?? randomUUID();
   const phaseResults: PhaseResult[] = excludedPhases.map((phase) => ({
     phase,
     status: 'skipped',
@@ -2245,6 +2249,7 @@ export async function runCycle(
           // #1586: scope synthesized writes to the cycle's resolved source
           // (explicit --source wins, else derived from the checkout dir).
           sourceId: cycleSourceId,
+          runId,
           once: opts.onceForPhase === 'synthesize',
           // #4077: combined external-abort + lock-steal signal, so a
           // cancelled cycle stops judge calls, inline children, and
@@ -2457,9 +2462,9 @@ export async function runCycle(
         const { result, duration_ms } = await racedTimePhase(() => runPhasePatterns(engine, {
           brainDir,
           dryRun,
+          runId,
           // W0 (Tier-1 #1): wrap the caller hook so this phase ALSO refreshes
-          // the cycle lock (pre-fix these sites passed the raw — in production
-          // always-undefined — hook, so long phases never refreshed).
+          // the cycle lock while preserving runtime metadata.
           yieldDuringPhase: buildYieldDuringPhase(lock, opts.yieldDuringPhase, onStolen),
           once: opts.onceForPhase === 'patterns',
           deadlineAtMs: opts.deadlineAtMs ?? null,

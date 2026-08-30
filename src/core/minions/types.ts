@@ -13,6 +13,8 @@
  *   await worker.start();
  */
 
+import type { RuntimeRequestMetadata } from '../ai/runtime.ts';
+
 // --- Status & Type Unions ---
 
 export type MinionJobStatus =
@@ -557,6 +559,8 @@ export interface SubagentHandlerData {
    * tool-registry build time.
    */
   source_id?: string;
+  /** Phase/run metadata forwarded unchanged to an external runtime. */
+  runtime_metadata?: RuntimeRequestMetadata;
   /**
    * #4217 — when true, a job whose put_page writes were ALL attempted-and-
    * failed FAILS (UnrecoverableError → dead, idempotency key released)
@@ -751,4 +755,11 @@ export interface SubagentResult {
   written_refs?: Array<{ slug: string; status: 'complete' | 'failed' }>;
   /** #4216 — true when a retried oneshot job finalized from a prior invocation's ledger. */
   recovered?: boolean;
+  /** Runtime-owned execution receipt, present when an external runtime handled the job. */
+  runtime?: {
+    request_id: string;
+    artifacts?: string[];
+    writes?: string[];
+    usage?: Record<string, unknown>;
+  };
 }

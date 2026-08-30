@@ -46,11 +46,10 @@ import { throwIfAborted } from '../abort-check.ts';
 export interface PatternsPhaseOpts {
   brainDir: string;
   dryRun: boolean;
-  /** #4077: cooperative cancellation from the enclosing cycle/minion job. A
-   *  cancelled cycle must stop the inline child and every derived-state
-   *  write instead of running out the force-evict grace. Mirrors
-   *  synthesize.ts's `signal`. */
+  /** #4077: cooperative cancellation from the enclosing cycle/minion job. */
   signal?: AbortSignal;
+  /** Stable cycle id forwarded to external runtime jobs. */
+  runId?: string;
   yieldDuringPhase?: () => Promise<void>;
   /**
    * issue #2860 — `gbrain dream --phase patterns --once`. Bypasses the
@@ -208,34 +207,33 @@ export async function runPhasePatterns(
     }
 
     const queue = new MinionQueue(engine);
-    // #2050: children drain inline on BOTH engines (see runSubagentsInline),
-    // so give this job a private per-run queue: the inline drain must never
-    // claim unrelated 'default'-queue jobs, and a 'default'-queue worker must
-    // never claim a child this parent is about to run itself. Mirrors
-    // synthesize.ts's childQueueName derivation exactly.
+    // #2050: children drain inline on a private per-run queue.
     const childQueueName = `dream-inline-${Date.now()}-${randomUUID().slice(0, 8)}`;
     ownedPrivateQueue = { queue, name: childQueueName };
     const privateQueueOwnerToken = randomUUID();
-    // Same lease posture as synthesize: rolling 10-min default lease renewed
-    // every ≤30s (drain loop + chunked post-drain wait); the whole wrapper is
-    // 30s-throttled so idle polls cost one UPDATE per half-minute.
     const renewPrivateQueueLease = queue.makeThrottledLeaseRenewer(
       childQueueName, privateQueueOwnerToken, opts.yieldDuringPhase,
     );
+    const runtimeRunId = opts.runId ?? `patterns:${Date.now()}`;
+    const runtimeIdempotencyKey = `dream:patterns:${runtimeRunId}`;
     const data: SubagentHandlerData = {
       prompt: buildPatternsPrompt(reflections, config.minEvidence, config.sourceSlugPrefix, config.outputSlugPrefix),
       model: config.model,
       max_turns: 30,
-      // #4217/CDX-12: a patterns child whose every put_page failed must
-      // dead-letter (its whole purpose is writing pattern pages), not report
-      // completed with zero pages.
+      // #4217: a patterns child whose every put_page failed must dead-letter.
       require_writes: true,
       allowed_slug_prefixes: allowedSlugPrefixes,
-      // #1586: scope every child tool call to the cycle's resolved source so
-      // put_page writes land there instead of the hardcoded 'default'.
       ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
+      runtime_metadata: {
+        run_id: runtimeRunId,
+        phase: 'patterns',
+        idempotency_key: runtimeIdempotencyKey,
+        write_policy: { mode: 'canonical', allow: allowedSlugPrefixes },
+        ...(opts.deadlineAtMs != null ? { deadline_at_ms: opts.deadlineAtMs } : {}),
+      },
     };
     const submitOpts: Partial<MinionJobInput> = {
+      idempotency_key: runtimeIdempotencyKey,
       max_stalled: 3,
       timeout_ms: budgets.timeoutMs,
       queue: childQueueName,

@@ -325,6 +325,26 @@ export async function checkEmbeddingMigrationState(engine: BrainEngine): Promise
 
 export async function checkSubagentCapability(engine: BrainEngine): Promise<Check> {
   try {
+    const { hasRuntimeCapability, isRuntimeConfigured } = await import('../../../core/ai/gateway.ts');
+    if (isRuntimeConfigured()) {
+      const wholeSubagent = hasRuntimeCapability('subagent');
+      const chatLoop = hasRuntimeCapability('chat');
+      if (!wholeSubagent && !chatLoop) {
+        return {
+          name: 'subagent_capability',
+          status: 'warn',
+          message: 'External runtime is configured but advertises neither subagent nor chat capability. Subagent jobs will fail closed without native-provider fallback.',
+        };
+      }
+      return {
+        name: 'subagent_capability',
+        status: 'ok',
+        message: wholeSubagent
+          ? 'External runtime owns the whole subagent loop; runtime authentication is configured outside GBrain.'
+          : 'External runtime supplies chat turns while GBrain retains the provider-neutral subagent tool loop.',
+      };
+    }
+
     const { classifyCapabilities } = await import('../../../core/ai/capabilities.ts');
     const modelsSubagent = await engine.getConfig('models.subagent');
     const tierSubagent = await engine.getConfig('models.tier.subagent');
