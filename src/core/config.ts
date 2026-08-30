@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'f
 import { isAbsolute, join } from 'path';
 import { homedir } from 'os';
 import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
+import type { RuntimeConfig } from './ai/runtime.ts';
 
 /**
  * Where is the active DB URL coming from? Pure introspection, no connection
@@ -76,6 +77,8 @@ export interface GBrainConfig {
   provider_base_urls?: Record<string, string>;
   /** Optional chat request providerOptions overrides keyed by recipe id or "recipe:modelId". */
   provider_chat_options?: Record<string, Record<string, unknown>>;
+  /** External runtime adapter. File/env plane only; provider credentials remain runtime-owned. */
+  runtime?: RuntimeConfig;
   /**
    * Optional storage backend config (S3/Supabase/local). Shape matches
    * `StorageConfig` in `./storage.ts`. Typed as `unknown` here to avoid
@@ -505,6 +508,41 @@ export function effectiveEnvDatabaseUrl(dir: string = process.cwd()): string | u
   return url;
 }
 
+function readRuntimeFromEnv(): RuntimeConfig | undefined {
+  const command = process.env.GBRAIN_RUNTIME_COMMAND;
+  if (!command) return undefined;
+
+  let args: string[] | undefined;
+  const rawArgs = process.env.GBRAIN_RUNTIME_ARGS_JSON;
+  if (rawArgs) {
+    try {
+      const parsed = JSON.parse(rawArgs);
+      if (Array.isArray(parsed) && parsed.every((value) => typeof value === 'string')) {
+        args = parsed;
+      }
+    } catch {
+      // The runtime adapter reports invalid configuration when it is constructed.
+    }
+  }
+
+  const capabilities = process.env.GBRAIN_RUNTIME_CAPABILITIES
+    ?.split(',')
+    .map((value) => value.trim())
+    .filter(Boolean) as RuntimeConfig['capabilities'];
+  const timeoutRaw = process.env.GBRAIN_RUNTIME_TIMEOUT_MS;
+  const maxOutputRaw = process.env.GBRAIN_RUNTIME_MAX_OUTPUT_BYTES;
+  const timeoutMs = timeoutRaw && Number.isInteger(Number(timeoutRaw)) ? Number(timeoutRaw) : undefined;
+  const maxOutputBytes = maxOutputRaw && Number.isInteger(Number(maxOutputRaw)) ? Number(maxOutputRaw) : undefined;
+
+  return {
+    command,
+    ...(args ? { args } : {}),
+    ...(capabilities && capabilities.length > 0 ? { capabilities } : {}),
+    ...(timeoutMs !== undefined ? { timeout_ms: timeoutMs } : {}),
+    ...(maxOutputBytes !== undefined ? { max_output_bytes: maxOutputBytes } : {}),
+  };
+}
+
 export function loadConfig(): GBrainConfig | null {
   let fileConfig: GBrainConfig | null = null;
   try {
@@ -529,6 +567,7 @@ export function loadConfig(): GBrainConfig | null {
     : fileConfig?.engine || (fileConfig?.database_path ? 'pglite' : 'postgres');
 
   // Merge: env vars override config file. READ only — never mutate process.env.
+  const envRuntime = readRuntimeFromEnv();
   const merged = {
     ...fileConfig,
     engine: inferredEngine,
@@ -544,6 +583,9 @@ export function loadConfig(): GBrainConfig | null {
     ...(process.env.GBRAIN_CHAT_MODEL ? { chat_model: process.env.GBRAIN_CHAT_MODEL } : {}),
     ...(process.env.GBRAIN_CHAT_FALLBACK_CHAIN
       ? { chat_fallback_chain: process.env.GBRAIN_CHAT_FALLBACK_CHAIN.split(',').map(s => s.trim()).filter(Boolean) }
+      : {}),
+    ...((fileConfig?.runtime || envRuntime)
+      ? { runtime: { ...(fileConfig?.runtime ?? {}), ...(envRuntime ?? {}) } }
       : {}),
     ...(process.env.GBRAIN_EMBEDDING_MULTIMODAL
       ? { embedding_multimodal: process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true' }

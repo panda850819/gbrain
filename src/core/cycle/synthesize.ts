@@ -31,7 +31,13 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 // Canonical allow-list matcher — the union must agree with the server-side
 // check in put_page, so it reuses that function rather than re-deriving it.
 import { matchesSlugAllowList } from '../operations.ts';
-import { chat as gatewayChat, validateModelId, type ChatResult } from '../ai/gateway.ts';
+import {
+  chat as gatewayChat,
+  hasRuntimeCapability,
+  isRuntimeConfigured,
+  validateModelId,
+  type ChatResult,
+} from '../ai/gateway.ts';
 import { AIConfigError } from '../ai/errors.ts';
 import { normalizeModelId } from '../model-id.ts';
 import { hasAnthropicKey } from '../ai/anthropic-key.ts';
@@ -255,6 +261,10 @@ export interface SynthesizePhaseOpts {
    * correct (source_id, slug) row. Unset → legacy 'default'.
    */
   sourceId?: string;
+  /** Stable cycle id forwarded to external runtime jobs. */
+  runId?: string;
+  /** Absolute enclosing minion-job deadline forwarded to child runtime requests. */
+  deadlineAtMs?: number | null;
   /**
    * issue #2860 — `gbrain dream --phase synthesize --once`. Bypasses the
    * `dream.synthesize.enabled` gate for THIS call only (does NOT bypass
@@ -487,15 +497,6 @@ export async function runPhaseSynthesize(
           ? `anthropic:${config.model}`
           : config.model;
       for (let i = 0; i < chunks.length; i++) {
-        const childData: SubagentHandlerData = {
-          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock, writeTargets),
-          model: subagentModel,
-          max_turns: 30,
-          allowed_slug_prefixes: allowedSlugPrefixes,
-          // #1586: scope every child tool call to the cycle's resolved source
-          // so put_page writes land there instead of the hardcoded 'default'.
-          ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
-        };
         // Idempotency key parity:
         //   - single-chunk → legacy `dream:synth:<filePath>:<hash16>` (byte-
         //     equivalent across versions; preserves dedup for unchanged
@@ -505,6 +506,22 @@ export async function runPhaseSynthesize(
         const idempotency_key = isChunked
           ? `dream:synth:${t.filePath}:${hash16}:c${i}of${chunks.length}`
           : `dream:synth:${t.filePath}:${hash16}`;
+        const childData: SubagentHandlerData = {
+          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock, writeTargets),
+          model: subagentModel,
+          max_turns: 30,
+          allowed_slug_prefixes: allowedSlugPrefixes,
+          // #1586: scope every child tool call to the cycle's resolved source
+          // so put_page writes land there instead of the hardcoded 'default'.
+          ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
+          runtime_metadata: {
+            run_id: opts.runId ?? `synthesize:${t.filePath}:${hash16}`,
+            phase: 'synthesize',
+            idempotency_key,
+            write_policy: { mode: 'canonical', allow: allowedSlugPrefixes },
+            ...(opts.deadlineAtMs != null ? { deadline_at_ms: opts.deadlineAtMs } : {}),
+          },
+        };
         const submitOpts: Partial<MinionJobInput> = {
           max_stalled: 3,
           on_child_fail: 'continue',
@@ -936,19 +953,20 @@ export function makeJudgeClient(verdictModel: string): JudgeClient | null {
   // returns bare anthropic ids (e.g. `claude-haiku-4-5`); gateway.chat needs `anthropic:...`.
   const modelStr = normalizeModelId(verdictModel);
 
-  // #1698 (C1): id-validity via the shared `validateModelId` core (resolveRecipe +
-  // assertTouchpoint) — catches unknown provider AND typo'd native model. We do NOT
-  // use the full `probeChatModel` here: its `isAvailable` layer would reject
-  // non-Anthropic-no-key providers and an unconfigured gateway, breaking the
-  // deliberate per-transcript-degrade contract (and test A9). validateModelId reads
-  // the recipe registry, not gateway _config, so it works pre-configureGateway().
-  const v = validateModelId(modelStr);
-  if (!v.ok) return null;
+  if (isRuntimeConfigured()) {
+    if (!hasRuntimeCapability('chat')) return null;
+  } else {
+    // #1698 (C1): id-validity via the shared `validateModelId` core
+    // (resolveRecipe + assertTouchpoint). Runtime mode treats the model as
+    // an opaque intent and lets the selected runtime resolve it.
+    const v = validateModelId(modelStr);
+    if (!v.ok) return null;
 
-  // Anthropic key probe (legacy behavior preserved verbatim). Other providers' key
-  // checks happen lazily at chat call time and surface as AIConfigError, which the
-  // verdict loop catches per-transcript.
-  if (v.parsed.providerId === 'anthropic' && !hasAnthropicKey()) return null;
+    // Anthropic key probe (legacy behavior preserved verbatim). Other
+    // providers' key checks happen lazily at chat call time and surface as
+    // AIConfigError, which the verdict loop catches per-transcript.
+    if (v.parsed.providerId === 'anthropic' && !hasAnthropicKey()) return null;
+  }
 
   return {
     create: async (params): Promise<Anthropic.Message> => {

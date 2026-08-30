@@ -101,26 +101,29 @@ export class MinionQueue {
     if (jobName === 'subagent' && data && typeof data === 'object') {
       const submittedModel = (data as { model?: unknown }).model;
       if (typeof submittedModel === 'string' && submittedModel.length > 0) {
-        const { classifyCapabilities } = await import('../ai/capabilities.ts');
-        const verdict = classifyCapabilities(submittedModel);
-        if (verdict === 'unusable:no_tools') {
-          throw new Error(
-            `subagent job rejected: data.model "${submittedModel}" lacks native tool calling. ` +
-            `The subagent loop dispatches brain ops via tool calls — without tool support the loop has no way to run. ` +
-            `Pick a provider that supports tools (anthropic, openai, google, openrouter, litellm-proxy, deepseek, groq, together, azure-openai).`,
-          );
+        const { isRuntimeConfigured } = await import('../ai/gateway.ts');
+        if (!isRuntimeConfigured()) {
+          const { classifyCapabilities } = await import('../ai/capabilities.ts');
+          const verdict = classifyCapabilities(submittedModel);
+          if (verdict === 'unusable:no_tools') {
+            throw new Error(
+              `subagent job rejected: data.model "${submittedModel}" lacks native tool calling. ` +
+              `The subagent loop dispatches brain ops via tool calls — without tool support the loop has no way to run. ` +
+              `Pick a provider that supports tools (anthropic, openai, google, openrouter, litellm-proxy, deepseek, groq, together, azure-openai).`,
+            );
+          }
+          if (verdict === 'unknown') {
+            throw new Error(
+              `subagent job rejected: data.model "${submittedModel}" references an unknown provider. ` +
+              `Use format provider:model where provider matches a recipe in src/core/ai/recipes/. ` +
+              `Known providers: anthropic, openai, google, openrouter, litellm-proxy, ollama, llama-server, ` +
+              `together, azure-openai, deepseek, groq, dashscope, minimax, zhipu, voyage, zeroentropyai.`,
+            );
+          }
+          // 'degraded:no_caching' and 'degraded:no_parallel' pass through — the
+          // gateway prints a once-per-(source, model) cost warning at first
+          // dispatch. 'ok' passes through silently.
         }
-        if (verdict === 'unknown') {
-          throw new Error(
-            `subagent job rejected: data.model "${submittedModel}" references an unknown provider. ` +
-            `Use format provider:model where provider matches a recipe in src/core/ai/recipes/. ` +
-            `Known providers: anthropic, openai, google, openrouter, litellm-proxy, ollama, llama-server, ` +
-            `together, azure-openai, deepseek, groq, dashscope, minimax, zhipu, voyage, zeroentropyai.`,
-          );
-        }
-        // 'degraded:no_caching' and 'degraded:no_parallel' pass through — the
-        // gateway prints a once-per-(source, model) cost warning at first
-        // dispatch. 'ok' passes through silently.
       }
     }
     await this.ensureSchema();
