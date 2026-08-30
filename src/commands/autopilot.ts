@@ -859,9 +859,11 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         // the handful of hosted-key config values so the resolveKey closure
         // passed to embeddingProviderConfigured() can stay synchronous.
         let embeddingModel: string | undefined;
+        let runtimeChatAvailable = false;
         try {
           const gw = await import('../core/ai/gateway.ts');
           embeddingModel = gw.getEmbeddingModel();
+          runtimeChatAvailable = gw.isRuntimeConfigured() && gw.hasRuntimeCapability('chat');
         } catch {
           embeddingModel = (await engine.getConfig('embedding_model')) ?? undefined;
         }
@@ -876,7 +878,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
             const cfgField = HOSTED_EMBED_KEY_CONFIG[envVar];
             return !!(process.env[envVar] || (cfgField ? embedKeyCfg[cfgField] : undefined));
           }),
-          hasChatApiKey: !!(process.env.ANTHROPIC_API_KEY || await engine.getConfig('anthropic_api_key')),
+          hasChatApiKey: runtimeChatAvailable || !!(process.env.ANTHROPIC_API_KEY || await engine.getConfig('anthropic_api_key')),
         };
         // v0.41.18.0 (A5 + A19 + A22, T15): consult onboard recommendations
         // ALONGSIDE doctor's brain-score recommendations. Onboard's 4 new

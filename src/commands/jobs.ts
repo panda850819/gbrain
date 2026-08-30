@@ -1871,13 +1871,11 @@ export async function registerBuiltinHandlers(
     }
   }
 
-  // v0.15 subagent handlers: always-on. Unlike shell (which needs an env
-  // flag because of RCE surface), subagent only calls the Anthropic API
-  // with the operator's own ANTHROPIC_API_KEY — no key, the SDK call
-  // fails immediately. Who-can-submit is already gated by
-  // PROTECTED_JOB_NAMES + TrustedSubmitOpts (MCP can't submit subagent
-  // jobs; only the CLI path with allowProtectedSubmit can). No separate
-  // cost-ceremony env flag needed.
+  // v0.15 subagent handlers: always-on. In native mode the selected provider
+  // owns authentication; in external-runtime mode the runtime owns it and no
+  // Anthropic API key is required. Who-can-submit is still gated by
+  // PROTECTED_JOB_NAMES + TrustedSubmitOpts (MCP can't submit subagent jobs;
+  // only the CLI path with allowProtectedSubmit can).
   const { makeSubagentHandler } = await import('../core/minions/handlers/subagent.ts');
   const { subagentAggregatorHandler } = await import('../core/minions/handlers/subagent-aggregator.ts');
   worker.register('subagent', makeSubagentHandler({ engine }));

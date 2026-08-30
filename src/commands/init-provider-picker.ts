@@ -163,7 +163,8 @@ export async function pickProvider(opts: PickProviderOpts): Promise<PickedProvid
   const isChatTouchpoint = opts.touchpoint === 'chat';
   const isAnthropic = picked.id === 'anthropic';
   const anthropicKeySet = !!env.ANTHROPIC_API_KEY;
-  if (isChatTouchpoint && !isAnthropic && !anthropicKeySet) {
+  const externalRuntimeConfigured = !!env.GBRAIN_RUNTIME_COMMAND;
+  if (isChatTouchpoint && !isAnthropic && !anthropicKeySet && !externalRuntimeConfigured) {
     printSubagentAnthropicCaveat(writeStderr);
   }
 

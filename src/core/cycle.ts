@@ -44,6 +44,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, statSync } from 'fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'path';
 import { gbrainPath } from './config.ts';
 import type { BrainEngine } from './engine.ts';
@@ -409,6 +410,8 @@ export interface CycleReport {
 export interface CycleOpts {
   /** If true, no writes to filesystem or DB. All phases honor this. */
   dryRun?: boolean;
+  /** Stable caller-provided cycle identifier for runtime handoffs. */
+  runId?: string;
   /** Defaults to ALL_PHASES. Pass a subset for --phase lint etc. */
   phases?: CyclePhase[];
   /**
@@ -1450,6 +1453,7 @@ export async function runCycle(
   const dryRun = !!opts.dryRun;
   const pull = !!opts.pull;
   const timestamp = new Date().toISOString();
+  const runId = opts.runId ?? randomUUID();
   const phaseResults: PhaseResult[] = [];
 
   // Capture as a const so it narrows to `string` inside the `else` branches of
@@ -1716,6 +1720,8 @@ export async function runCycle(
           // #1586: scope synthesized writes to the cycle's resolved source
           // (explicit --source wins, else derived from the checkout dir).
           sourceId: cycleSourceId,
+          runId,
+          deadlineAtMs: opts.deadlineAtMs,
           once: opts.onceForPhase === 'synthesize',
         }));
         result.duration_ms = duration_ms;
@@ -1919,6 +1925,7 @@ export async function runCycle(
         const { result, duration_ms } = await timePhase(() => runPhasePatterns(engine, {
           brainDir,
           dryRun,
+          runId,
           yieldDuringPhase: opts.yieldDuringPhase,
           once: opts.onceForPhase === 'patterns',
           deadlineAtMs: opts.deadlineAtMs ?? null,

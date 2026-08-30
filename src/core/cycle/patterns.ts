@@ -42,6 +42,8 @@ import { normalizeModelId } from '../model-id.ts';
 export interface PatternsPhaseOpts {
   brainDir: string;
   dryRun: boolean;
+  /** Stable cycle id forwarded to external runtime jobs. */
+  runId?: string;
   yieldDuringPhase?: () => Promise<void>;
   /**
    * issue #2860 — `gbrain dream --phase patterns --once`. Bypasses the
@@ -178,13 +180,23 @@ export async function runPhasePatterns(
     }
 
     const queue = new MinionQueue(engine);
+    const runtimeRunId = opts.runId ?? `patterns:${Date.now()}`;
+    const runtimeIdempotencyKey = `dream:patterns:${runtimeRunId}`;
     const data: SubagentHandlerData = {
       prompt: buildPatternsPrompt(reflections, config.minEvidence, writeTargets),
       model: config.model,
       max_turns: 30,
       allowed_slug_prefixes: patternsAllowList,
+      runtime_metadata: {
+        run_id: runtimeRunId,
+        phase: 'patterns',
+        idempotency_key: runtimeIdempotencyKey,
+        write_policy: { mode: 'canonical', allow: patternsAllowList },
+        ...(opts.deadlineAtMs != null ? { deadline_at_ms: opts.deadlineAtMs } : {}),
+      },
     };
     const submitOpts: Partial<MinionJobInput> = {
+      idempotency_key: runtimeIdempotencyKey,
       max_stalled: 3,
       timeout_ms: budgets.timeoutMs,
     };
@@ -238,7 +250,7 @@ export async function runPhasePatterns(
     // returned status:ok even when the subagent timed out (e.g. no
     // subagent-capable worker slot free for the whole wait window) and zero
     // pattern pages were written — a silent no-op for days.
-    if (outcome !== 'complete') {
+    if (outcome !== 'completed') {
       if (writtenRefs.length === 0) {
         return {
           phase: 'patterns',

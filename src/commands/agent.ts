@@ -88,8 +88,8 @@ VIEWING
 
 NOTES
   Submitting subagent jobs is trusted-only; MCP submitters receive
-  permission_denied. The worker needs ANTHROPIC_API_KEY set, or the
-  first LLM turn of a claimed job fails.
+  permission_denied. Native provider mode requires the selected provider's
+  credentials. External runtime mode delegates authentication to the runtime.
 `);
 }
 

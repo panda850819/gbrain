@@ -2788,6 +2788,9 @@ async function checkEmbeddingEnvOverride(engine: BrainEngine): Promise<Check> {
 export async function checkSubagentCapability(engine: BrainEngine): Promise<Check> {
   try {
     const { classifyCapabilities } = await import('../core/ai/capabilities.ts');
+    const { isRuntimeConfigured } = await import('../core/ai/gateway.ts');
+    const { loadConfig } = await import('../core/config.ts');
+    const runtimeConfigured = isRuntimeConfigured() || Boolean(loadConfig()?.runtime);
     const tierSubagent = await engine.getConfig('models.tier.subagent');
     const modelsDefault = await engine.getConfig('models.default');
 
@@ -2828,29 +2831,26 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
       return null;
     };
 
-    if (tierSubagent) {
-      const issue = explain(tierSubagent, 'models.tier.subagent');
-      if (issue) return issue;
-    } else if (modelsDefault) {
-      const issue = explain(modelsDefault, 'models.default');
-      if (issue) return issue;
+    if (!runtimeConfigured) {
+      if (tierSubagent) {
+        const issue = explain(tierSubagent, 'models.tier.subagent');
+        if (issue) return issue;
+      } else if (modelsDefault) {
+        const issue = explain(modelsDefault, 'models.default');
+        if (issue) return issue;
+      }
     }
-    // v0.37 (T10 / D7) + v0.38 (D7 capability rename): warn when the configured
-    // chat_model is non-Anthropic AND ANTHROPIC_API_KEY isn't set. With
-    // agent.use_gateway_loop=false (the v0.38 default), subagent jobs still
-    // require Anthropic at runtime; without the key, gbrain dream / gbrain
-    // agent run / gbrain autopilot will all fail at job submission. Catches
-    // the post-init drift case the init-time caveat would have shown if init
-    // had been re-run.
+    // v0.37 (T10 / D7) + v0.38 (D7 capability rename): warn when a native
+    // non-Anthropic subagent path has no provider key. A configured external
+    // runtime owns authentication and must not require ANTHROPIC_API_KEY.
     try {
-      const { loadConfig } = await import('../core/config.ts');
       const cfg = loadConfig();
       const chatModel = cfg?.chat_model;
       const gatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
       const gatewayLoopEnabled = typeof gatewayLoopRaw === 'string'
         && ['true', '1', 'yes', 'on'].includes(gatewayLoopRaw.trim().toLowerCase());
       const { isAnthropicProvider } = await import('../core/model-config.ts');
-      if (chatModel && !isAnthropicProvider(chatModel) && !process.env.ANTHROPIC_API_KEY && !gatewayLoopEnabled) {
+      if (!runtimeConfigured && chatModel && !isAnthropicProvider(chatModel) && !process.env.ANTHROPIC_API_KEY && !gatewayLoopEnabled) {
         return {
           name: 'subagent_capability',
           status: 'warn',
@@ -2866,7 +2866,9 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
     return {
       name: 'subagent_capability',
       status: 'ok',
-      message: tierSubagent
+      message: runtimeConfigured
+        ? 'Subagent phases use the configured external runtime; no Anthropic API key is required'
+        : tierSubagent
         ? `Subagent tier resolves to "${tierSubagent}" with full tool-loop capability`
         : `Subagent tier resolves to default (claude-sonnet-4-6) — full tool-loop capability`,
     };

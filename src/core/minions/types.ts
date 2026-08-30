@@ -13,6 +13,8 @@
  *   await worker.start();
  */
 
+import type { RuntimeRequestMetadata } from '../ai/runtime.ts';
+
 // --- Status & Type Unions ---
 
 export type MinionJobStatus =
@@ -472,6 +474,8 @@ export interface SubagentHandlerData {
    * tool-registry build time.
    */
   source_id?: string;
+  /** Phase/run metadata forwarded unchanged to an external runtime. */
+  runtime_metadata?: RuntimeRequestMetadata;
   /**
    * v0.41 Approach C: opt out of the auto-generated tool-usage preamble
    * that `buildSystemPrompt()` splices into `system`. Default behavior
@@ -603,5 +607,12 @@ export interface SubagentResult {
     out: number;
     cache_read: number;
     cache_create: number;
+  };
+  /** Runtime-owned execution receipt, present when an external runtime handled the job. */
+  runtime?: {
+    request_id: string;
+    artifacts?: string[];
+    writes?: string[];
+    usage?: Record<string, unknown>;
   };
 }
