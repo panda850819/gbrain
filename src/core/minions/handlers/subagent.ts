@@ -348,7 +348,9 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       }
       if (verdict === 'unusable:no_subagent_loop') {
         throw new Error(
-          `subagent job rejected: data.model "${data.model}" does not support a replay-stable subagent loop.`,
+          `subagent job rejected: data.model "${data.model}" comes from a provider whose recipe declares ` +
+          `supports_subagent_loop: false — its tool_call_ids are not stable enough across crashes/replays ` +
+          `to drive the subagent loop.`,
         );
       }
       if (verdict === 'unknown') {
