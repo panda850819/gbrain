@@ -18,12 +18,14 @@ describe('computeConversationParserProbeHealthCheck', () => {
   test('disabled + no events → ok with paste-ready enable hint', () => {
     const check = computeConversationParserProbeHealthCheck(false, []);
     expect(check.status).toBe('ok');
+    expect(check.severity).toBe('expected');
     expect(check.message).toContain('gbrain config set autopilot.conversation_parser_probe.enabled true');
   });
 
   test('enabled + no events yet → ok, next run by autopilot', () => {
     const check = computeConversationParserProbeHealthCheck(true, []);
     expect(check.status).toBe('ok');
+    expect(check.severity).toBe('coverage_gap');
     expect(check.message).toContain('no probe events');
   });
 
@@ -39,8 +41,24 @@ describe('computeConversationParserProbeHealthCheck', () => {
       ev('adversarial_false_positive', '1 adversarial fixture(s) parsed to non-empty'),
     ]);
     expect(check.status).toBe('warn');
+    expect(check.severity).toBe('warn');
     expect(check.message).toContain('adversarial_false_positive');
     expect(check.message).toContain('parsed to non-empty');
+  });
+
+  test('historical failures followed by a passing latest run are informational', () => {
+    const check = computeConversationParserProbeHealthCheck(true, [
+      ev('fail', 'old fixture mismatch'),
+      ev('adversarial_false_positive', 'old adversarial result'),
+      ev('pass'),
+    ]);
+
+    expect(check.status).toBe('warn');
+    expect(check.severity).toBe('info');
+    expect(check.message).toContain('historical');
+    expect(check.message).toContain('latest: pass');
+    expect((check.details as { current_status: string }).current_status).toBe('pass');
+    expect((check.details as { historical_failures: number }).historical_failures).toBe(2);
   });
 
   test('all pass → ok with run count', () => {

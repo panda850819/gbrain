@@ -103,6 +103,7 @@ describe('computeExtractAtomsBacklogCheck (issue #1678)', () => {
     const check = await withEnv({ GBRAIN_HOME: EMPTY_HOME }, () =>
       computeExtractAtomsBacklogCheck(engine));
     expect(check.status).toBe('warn');
+    expect(check.severity).toBe('coverage_gap');
     expect(check.message).toContain('--drain');
     expect((check.details as { pack_declares_phase: boolean }).pack_declares_phase).toBe(false);
     expect((check.details as { known_approximation: string }).known_approximation).toContain('page backlog only');
@@ -119,6 +120,7 @@ describe('computeExtractAtomsBacklogCheck (issue #1678)', () => {
     const check = await withEnv({ GBRAIN_HOME: EMPTY_HOME }, () =>
       computeExtractAtomsBacklogCheck(engine));
     expect(check.status).toBe('warn');
+    expect(check.severity).toBe('coverage_gap');
     expect(check.message).toContain('gbrain dream --phase extract_atoms --drain --source gbrain-raw --window 120');
     expect((check.details as { fix_hint: string }).fix_hint).toContain('--source gbrain-raw');
     expect((check.details as { backlog_by_source: Array<{ source_id: string; backlog: number }> }).backlog_by_source)

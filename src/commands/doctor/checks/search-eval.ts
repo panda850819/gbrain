@@ -6,7 +6,7 @@
  */
 import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
-import { loadConfig, type GBrainConfig } from '../../../core/config.ts';
+import { isConfigTruthy, loadConfig, type GBrainConfig } from '../../../core/config.ts';
 // Leaf module (no flag surface of its own) — see that file for why this
 // isn't imported from extract-conversation-facts.ts directly (#4135).
 import { ALLOWED_TYPES } from '../../../core/facts/conversation-types.ts';
@@ -436,6 +436,23 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
       const gatewayLoopEnabled = isConfigTruthy(gatewayLoopRaw);
       const { isAnthropicProvider } = await import('../../../core/model-config.ts');
       if (chatModel && !isAnthropicProvider(chatModel) && !process.env.ANTHROPIC_API_KEY && !gatewayLoopEnabled) {
+        const localSemanticPhasesDisabled = await areLocalSemanticPhasesDisabled(engine);
+        if (localSemanticPhasesDisabled) {
+          return {
+            name: 'subagent_capability',
+            status: 'warn',
+            severity: 'expected',
+            message:
+              `chat_model is "${chatModel}" without a native Anthropic subagent key, but local semantic ` +
+              `phases are disabled by configuration. Native semantic subagent execution is expected to be ` +
+              `owned by an external runtime; no local semantic jobs are scheduled.`,
+            details: {
+              local_semantic_phases_disabled: true,
+              external_runtime_configured: false,
+              semantic_owner: 'external_runtime',
+            },
+          };
+        }
         return {
           name: 'subagent_capability',
           status: 'warn',
@@ -464,6 +481,25 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
   }
 }
 
+/**
+ * The two local semantic schedulers default on. Only an explicit false on
+ * both is strong enough evidence to call a missing native subagent expected;
+ * an unset or unreadable gate must keep the legacy warning.
+ */
+async function areLocalSemanticPhasesDisabled(engine: BrainEngine): Promise<boolean> {
+  try {
+    const [proposeTakes, autoDrain] = await Promise.all([
+      engine.getConfig('cycle.propose_takes.enabled'),
+      engine.getConfig('autopilot.auto_drain.enabled'),
+    ]);
+    const isExplicitlyFalse = (raw: string | null): boolean =>
+      raw !== null && ['false', '0', 'no', 'off'].includes(raw.trim().toLowerCase());
+    return isExplicitlyFalse(proposeTakes) && isExplicitlyFalse(autoDrain);
+  } catch {
+    return false;
+  }
+}
+
 // v0.38 — `checkSubagentProvider` was renamed to `checkSubagentCapability` (D7).
 // Back-compat alias preserved for any external doctor extensions importing it.
 const checkSubagentProvider = checkSubagentCapability;
@@ -479,7 +515,8 @@ void checkSubagentProvider;
  * Pure function form of the conversation_parser_probe_health check.
  * Mirrors computeNightlyQualityProbeHealthCheck: skip-with-hint when the
  * probe is off and silent, surface the last 7 days of audit events when
- * it has run, WARN on any non-pass outcome.
+ * it has run, and keep a warning actionable only when the latest outcome
+ * is still non-pass.
  *
  * `effectiveEnabled` folds the D10 mode-gate in: explicitly enabled OR
  * search.mode=tokenmax (where the probe is default-on).
@@ -493,27 +530,39 @@ export function computeConversationParserProbeHealthCheck(
     return {
       name,
       status: 'ok',
+      severity: 'expected',
       message:
         'disabled (opt-in; default-on only for search.mode=tokenmax). Enable with: ' +
         '`gbrain config set autopilot.conversation_parser_probe.enabled true`',
+      details: { current_status: 'disabled', historical_failures: 0 },
     };
   }
   if (events.length === 0) {
     return {
       name,
       status: 'ok',
+      severity: 'coverage_gap',
       message: 'enabled but no probe events in the last 7 days (next run by autopilot; fixtures require a source-checkout install).',
+      details: { current_status: 'not_observed', historical_failures: 0 },
     };
   }
   const bad = events.filter(e => e.outcome !== 'pass');
   const latest = events[events.length - 1]!;
   if (bad.length > 0) {
+    const latestIsPassing = latest.outcome === 'pass';
     return {
       name,
       status: 'warn',
+      severity: latestIsPassing ? 'info' : 'warn',
       message:
         `${bad.length}/${events.length} probe run(s) in the last 7 days did not pass; ` +
+        `${latestIsPassing ? `${bad.length} historical failure(s); ` : ''}` +
         `latest: ${latest.outcome}${latest.reason ? ` (${latest.reason})` : ''}`,
+      details: {
+        current_status: latest.outcome,
+        historical_failures: latestIsPassing ? bad.length : 0,
+        total_runs: events.length,
+      },
     };
   }
   return {

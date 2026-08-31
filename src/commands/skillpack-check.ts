@@ -19,6 +19,7 @@
 import { execFileSync } from 'child_process';
 import { VERSION } from '../version.ts';
 import { getCliOptions } from '../core/cli-options.ts';
+import { isActionableDoctorSeverity, resolveDoctorSeverity, type DoctorSeverity } from '../core/doctor-categories.ts';
 
 /**
  * Resolve the gbrain binary + args for spawning subcommands from
@@ -52,6 +53,7 @@ interface DoctorCheck {
   name: string;
   status: 'ok' | 'warn' | 'fail';
   message: string;
+  severity?: DoctorSeverity;
   issues?: unknown[];
 }
 
@@ -148,7 +150,8 @@ function buildReport(): SkillpackReport {
   // Gather actions from doctor failures.
   if ('checks' in doctor) {
     for (const check of doctor.checks) {
-      if (check.status === 'fail') {
+      const severity = resolveDoctorSeverity(check);
+      if (severity === 'fail') {
         healthy = false;
         // Extract remediation command from check message if it follows
         // the `... Run: <cmd>` convention. Otherwise include the whole
@@ -156,7 +159,7 @@ function buildReport(): SkillpackReport {
         const runMatch = check.message.match(/Run:\s*(.+)$/);
         if (runMatch) actions.push(runMatch[1].trim());
         else actions.push(`[${check.name}] ${check.message}`);
-      } else if (check.status === 'warn') {
+      } else if (isActionableDoctorSeverity(severity)) {
         // Warnings don't fail the report but surface as informational
         // actions the agent can decide about.
         const runMatch = check.message.match(/Run:\s*(.+)$/);

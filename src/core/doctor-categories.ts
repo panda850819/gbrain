@@ -51,6 +51,60 @@
 export type CheckCategory = 'brain' | 'skill' | 'ops' | 'meta';
 
 /**
+ * Doctor triage severity. `status` remains the legacy health signal exposed
+ * by each check; this additive field says whether that signal is actionable
+ * for the current runtime.
+ *
+ * `info`, `expected`, `coverage_gap`, and `needs_human` are intentionally
+ * non-actionable for the aggregate health score. A check may keep
+ * `status: 'warn'` for consumers that still bind to the old shape while
+ * carrying one of these values to explain why it is not a live outage.
+ */
+export type DoctorSeverity =
+  | 'ok'
+  | 'info'
+  | 'expected'
+  | 'coverage_gap'
+  | 'needs_human'
+  | 'warn'
+  | 'fail';
+
+export interface SeverityBearingCheck {
+  status: 'ok' | 'warn' | 'fail';
+  severity?: DoctorSeverity;
+}
+
+/**
+ * Resolve the severity used by scoring and issue ranking.
+ *
+ * A legacy `fail` is fail-closed: an accidental informational label can
+ * never hide a hard failure. Warnings may be deliberately reclassified by
+ * check authors when the evidence says they are historical/expected or a
+ * coverage/governance item.
+ */
+export function resolveDoctorSeverity(check: SeverityBearingCheck): DoctorSeverity {
+  if (check.status === 'fail') return 'fail';
+  if (check.status === 'warn' && check.severity === 'ok') return 'warn';
+  return check.severity ?? check.status;
+}
+
+export function isActionableDoctorSeverity(severity: DoctorSeverity): boolean {
+  return severity === 'warn' || severity === 'fail';
+}
+
+export function doctorSeverityLabel(severity: DoctorSeverity): string {
+  switch (severity) {
+    case 'ok': return 'OK';
+    case 'info': return 'INFO';
+    case 'expected': return 'EXPECTED';
+    case 'coverage_gap': return 'COVERAGE';
+    case 'needs_human': return 'HUMAN';
+    case 'warn': return 'WARN';
+    case 'fail': return 'FAIL';
+  }
+}
+
+/**
  * Data-integrity signals. Everything that asks "is the brain's actual data
  * healthy and complete?"
  */

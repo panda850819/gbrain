@@ -169,6 +169,81 @@ describe('doctor command', () => {
     }
   });
 
+  test('reranker_health keeps disabled reranker failures as informational history', async () => {
+    const { checkRerankerHealth } = await import('../src/commands/doctor.ts');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-rerank-disabled-doctor-'));
+    try {
+      await withEnv({ GBRAIN_AUDIT_DIR: tmpDir }, async () => {
+        logRerankFailure({
+          model: 'zeroentropyai:zerank-2',
+          reason: 'auth',
+          query_hash: 'historical-auth',
+          doc_count: 30,
+          error_summary: 'historical missing provider key',
+        });
+        const check = await checkRerankerHealth({
+          async getConfig(key: string): Promise<string | null> {
+            return key === 'search.reranker.enabled' ? 'false' : null;
+          },
+        } as any);
+        expect(check.status).toBe('warn');
+        expect(check.severity).toBe('info');
+        expect(check.message).toContain('historical');
+        expect((check.details as { historical_failures: number }).historical_failures).toBe(1);
+      });
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('subagent_capability labels intentionally disabled local semantic work as expected', async () => {
+    const { checkSubagentCapability } = await import('../src/commands/doctor.ts');
+    const { __setRuntimeAdapterForTests } = await import('../src/core/ai/gateway.ts');
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-subagent-disabled-doctor-'));
+    try {
+      mkdirSync(join(home, '.gbrain'), { recursive: true });
+      writeFileSync(
+        join(home, '.gbrain', 'config.json'),
+        JSON.stringify({ engine: 'pglite', chat_model: 'openai:gpt-5.2' }),
+      );
+      __setRuntimeAdapterForTests(null);
+      await withEnv(
+        {
+          GBRAIN_HOME: home,
+          ANTHROPIC_API_KEY: undefined,
+          GBRAIN_RUNTIME_COMMAND: undefined,
+        },
+        async () => {
+          const config = new Map<string, string | null>([
+            ['cycle.propose_takes.enabled', 'false'],
+            ['autopilot.auto_drain.enabled', 'false'],
+          ]);
+          const check = await checkSubagentCapability({
+            async getConfig(key: string): Promise<string | null> {
+              return config.get(key) ?? null;
+            },
+          } as any);
+          expect(check.status).toBe('warn');
+          expect(check.severity).toBe('expected');
+          expect(check.message).toContain('disabled');
+          expect(check.message).toContain('semantic');
+
+          config.set('cycle.propose_takes.enabled', 'maybe');
+          const malformed = await checkSubagentCapability({
+            async getConfig(key: string): Promise<string | null> {
+              return config.get(key) ?? null;
+            },
+          } as any);
+          expect(malformed.status).toBe('warn');
+          expect(malformed.severity).toBeUndefined();
+          expect(malformed.message).toContain('will fail at job submission');
+        },
+      );
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test('#3628: reranker_health surfaces budget failures with pricing guidance', async () => {
     const { checkRerankerHealth } = await import('../src/commands/doctor.ts');
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-rerank-budget-doctor-'));

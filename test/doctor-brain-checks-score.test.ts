@@ -3,7 +3,7 @@
  *
  * Pinned contracts:
  *   - health_score math is byte-identical to pre-v0.41.19.0 for a fixed
- *     check set (back-compat invariant for MCP consumers, --remediate,
+ *     unclassified check set (back-compat invariant for MCP consumers, --remediate,
  *     remote doctor).
  *   - brain_checks_score is the same penalty math restricted to brain
  *     checks.
@@ -21,8 +21,13 @@
 import { describe, test, expect } from 'bun:test';
 import { computeDoctorReport, type Check } from '../src/commands/doctor.ts';
 
-function check(name: string, status: Check['status'], message = ''): Check {
-  return { name, status, message };
+function check(
+  name: string,
+  status: Check['status'],
+  message = '',
+  severity?: Check['severity'],
+): Check {
+  return { name, status, message, ...(severity ? { severity } : {}) };
 }
 
 describe('computeDoctorReport — back-compat health_score invariant', () => {
@@ -177,5 +182,57 @@ describe('computeDoctorReport — renaming regression (codex MAJOR-8)', () => {
     const r = computeDoctorReport([check('brain_score', 'ok', 'Brain score 92/100')]);
     expect(r.checks[0].category).toBe('brain');
     expect(r.checks[0].message).toContain('92');
+  });
+});
+
+describe('computeDoctorReport — doctor severity triage', () => {
+  test('non-outage classifications stay visible but do not pollute health', () => {
+    const r = computeDoctorReport([
+      check('reranker_health', 'warn', 'historical reranker failures', 'info'),
+      check('conversation_parser_probe_health', 'warn', 'latest pass; old failures', 'info'),
+      check('subagent_capability', 'warn', 'native phase disabled by topology', 'expected'),
+      check('extract_atoms_backlog', 'warn', 'handoff not configured', 'coverage_gap'),
+    ]);
+
+    expect(r.status).toBe('healthy');
+    expect(r.health_score).toBe(100);
+    expect(r.category_scores.brain).toBe(100);
+    expect(r.category_scores.ops).toBe(100);
+    expect(r.top_issues).toEqual([]);
+    expect(r.checks.map((c) => c.severity)).toEqual([
+      'info',
+      'info',
+      'expected',
+      'coverage_gap',
+    ]);
+  });
+
+  test('explicit actionable warn still affects status, score, and top issues', () => {
+    const r = computeDoctorReport([
+      check('connection', 'warn', 'database is reachable but degraded', 'warn'),
+    ]);
+
+    expect(r.status).toBe('warnings');
+    expect(r.health_score).toBe(95);
+    expect(r.top_issues?.map((issue) => issue.name)).toEqual(['connection']);
+  });
+
+  test('a fail cannot be downgraded by an informational severity label', () => {
+    const r = computeDoctorReport([
+      check('connection', 'fail', 'database unavailable', 'info'),
+    ]);
+
+    expect(r.status).toBe('unhealthy');
+    expect(r.health_score).toBe(80);
+    expect(r.top_issues?.[0]?.status).toBe('fail');
+  });
+
+  test('a legacy warning cannot be relabeled as ok', () => {
+    const r = computeDoctorReport([
+      check('connection', 'warn', 'database degraded', 'ok'),
+    ]);
+
+    expect(r.status).toBe('warnings');
+    expect(r.health_score).toBe(95);
   });
 });

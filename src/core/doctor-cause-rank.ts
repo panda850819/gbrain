@@ -27,6 +27,9 @@ import {
   SKILL_CHECK_NAMES,
   OPS_CHECK_NAMES,
   META_CHECK_NAMES,
+  isActionableDoctorSeverity,
+  resolveDoctorSeverity,
+  type DoctorSeverity,
 } from './doctor-categories.ts';
 
 /** Minimal structural shape of a doctor Check that ranking needs. */
@@ -34,6 +37,7 @@ export interface RankableCheck {
   name: string;
   status: 'ok' | 'warn' | 'fail';
   message: string;
+  severity?: DoctorSeverity;
   details?: Record<string, unknown>;
 }
 
@@ -99,11 +103,12 @@ function tierOf(name: string): 'root' | 'symptom' {
 }
 
 /**
- * Rank non-ok checks: fail before warn, root before symptom, then name
- * (deterministic). Returns the full ranked list; the renderer caps to top-N.
+ * Rank actionable checks: fail before warn, root before symptom, then name
+ * (deterministic). Non-actionable triage states stay in the full report but
+ * do not enter this incident-oriented list; the renderer caps to top-N.
  */
 export function rankIssues(checks: RankableCheck[]): RankedIssue[] {
-  const failing = checks.filter((c) => c.status !== 'ok');
+  const failing = checks.filter((c) => isActionableDoctorSeverity(resolveDoctorSeverity(c)));
   const failingNames = new Set(failing.map((c) => c.name));
 
   const issues: RankedIssue[] = failing.map((c) => {
@@ -112,9 +117,10 @@ export function rankIssues(checks: RankableCheck[]): RankedIssue[] {
     const hint = c.details?.fix_hint;
     const fix =
       typeof hint === 'string' && hint.trim().length > 0 ? hint : c.message;
+    const severity = resolveDoctorSeverity(c);
     return {
       name: c.name,
-      status: c.status as 'warn' | 'fail',
+      status: severity as 'warn' | 'fail',
       tier: tierOf(c.name),
       ...(downstream_of ? { downstream_of } : {}),
       fix,
