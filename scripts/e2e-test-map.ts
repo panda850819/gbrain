@@ -49,8 +49,13 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // opt-in-gated (GBRAIN_REAL_HERMES_E2E) and self-skips in run-all anyway.
   "src/commands/claw-test.ts": ["test/e2e/claw-test.test.ts"],
   "src/core/claw-test/**": ["test/e2e/claw-test.test.ts"],
+  // External runtime protocol + gateway routing feed the provider-free dream
+  // phase E2E (real child process, queue, tool write, read-back, replay).
+  "src/core/ai/runtime.ts": ["test/e2e/dream-runtime-pglite.test.ts"],
+  "src/core/ai/gateway.ts": ["test/e2e/dream-runtime-pglite.test.ts"],
+  "scripts/runtime/hermes-runtime.py": ["test/e2e/dream-runtime-pglite.test.ts"],
   // dream.ts is a thin alias over runCycle in cycle.ts.
-  "src/core/cycle.ts": ["test/e2e/cycle.test.ts", "test/e2e/dream.test.ts"],
+  "src/core/cycle.ts": ["test/e2e/cycle.test.ts", "test/e2e/dream.test.ts", "test/e2e/dream-runtime-pglite.test.ts"],
   // Multi-source sync writes share the per-source bookmark anchor.
   "src/core/sync.ts": ["test/e2e/sync.test.ts", "test/e2e/multi-source.test.ts", "test/e2e/sync-reconcile-postgres.test.ts"],
   // F7: real SIGKILL mid-sync on live Postgres — checkpoint banking

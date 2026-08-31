@@ -130,7 +130,7 @@ describe('E2E runtime mode — patterns phase', () => {
           runId,
           deadlineAtMs,
         });
-        expect(phase.status).toBe('ok');
+        expect(phase).toMatchObject({ status: 'ok' });
         const details = phase.details as {
           reflections_considered: number;
           patterns_written: number;

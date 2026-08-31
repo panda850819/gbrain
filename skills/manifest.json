@@ -15,6 +15,11 @@
       "description": "Connect a ChatGPT or Claude account and sync its conversation history into the brain incrementally, on a schedule. Live account lane (export files + retrieval live in conversation-archive)."
     },
     {
+      "name": "transcript-ingest",
+      "path": "transcript-ingest/SKILL.md",
+      "description": "Collect, deduplicate, distill, and file durable knowledge from Claude Code, Codex, and Hermes session transcripts."
+    },
+    {
       "name": "query",
       "path": "query/SKILL.md",
       "description": "Answer questions using 3-layer search, synthesis, and citation propagation"

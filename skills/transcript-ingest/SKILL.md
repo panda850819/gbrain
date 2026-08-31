@@ -117,7 +117,7 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
 - `prompts/gate_prompt.md` — signal/noise + domain + novelty + durability
 - `prompts/distill_prompt.md` — per-session gate+distill worker
 - Agent (in-harness subagents) for gate + distill
-- `gbrain put_page` / `capture` only at the manual filing step
+- `gbrain put` / `capture` only at the manual filing step
 
 ## Not Yet Wired
 

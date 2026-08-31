@@ -256,7 +256,6 @@ function replayTerminalStopReason(
 export function makeSubagentHandler(deps: SubagentDeps) {
   const engine = deps.engine;
   const config = deps.config ?? loadConfig() ?? ({ engine: 'postgres' } as GBrainConfig);
-  const runtimeConfigured = isRuntimeConfigured();
   // Construct the Anthropic client lazily so runtime mode never touches the SDK.
   const makeAnthropic = deps.makeAnthropic ?? (() => new Anthropic({ apiKey: resolveAnthropicKey() }));
   let client: MessagesClient | undefined = deps.client;
@@ -326,6 +325,9 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     if (!data.prompt || typeof data.prompt !== 'string') {
       throw new Error('subagent job data.prompt is required (string)');
     }
+    // Read live gateway state per invocation: workers may be constructed before
+    // a runtime config reload, and tests deliberately reconfigure the gateway.
+    const runtimeConfigured = isRuntimeConfigured();
 
     // v0.38 (S1.5 + S1.7) — capability-based gate replaces the v0.31.12
     // Anthropic-only check. The handler now routes between two paths:
@@ -415,7 +417,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       const modelForVerdict = splitProviderModelId(model).provider === null && isAnthropicProvider(model)
         ? normalizeModelId(model)
         : model;
-      const verdict = alreadyTerminal ? 'ok' : classifyCapabilities(modelForVerdict);
+      const verdict = runtimeConfigured || alreadyTerminal ? 'ok' : classifyCapabilities(modelForVerdict);
       if (verdict === 'unusable:no_tools') {
         throw new Error(
           `subagent job rejected: ${modelSource} "${model}" lacks native tool calling. ` +

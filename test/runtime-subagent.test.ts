@@ -13,6 +13,7 @@ import type { MinionJobContext } from '../src/core/minions/types.ts';
 import {
   __setRuntimeAdapterForTests,
   configureGateway,
+  isRuntimeConfigured,
   resetGateway,
   type ChatResult,
 } from '../src/core/ai/gateway.ts';
@@ -117,6 +118,7 @@ describe('runtime-mode subagent execution', () => {
       runtime: { command: process.execPath, capabilities: ['chat'] },
     });
     __setRuntimeAdapterForTests(runtime);
+    expect(isRuntimeConfigured()).toBe(true);
 
     let makeAnthropicCalled = false;
     const handler = makeSubagentHandler({
@@ -133,6 +135,7 @@ describe('runtime-mode subagent execution', () => {
       {},
       { allowProtectedSubmit: true },
     );
+    expect(isRuntimeConfigured()).toBe(true);
 
     const result = await handler(makeContext({ id: job.id, name: job.name, data: job.data as Record<string, unknown> }));
 

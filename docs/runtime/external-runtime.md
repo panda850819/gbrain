@@ -45,6 +45,19 @@ When `capabilities` is omitted, the adapter advertises `chat` only. A missing
 capability returns an explicit `unsupported` response and never falls back to a
 GBrain provider.
 
+### Split-host production topology
+
+The command adapter is optional. If Hermes runs on a separate Mac mini and owns
+the scheduled semantic workflow through remote personal-gbrain MCP, leave
+`runtime.command` / `GBRAIN_RUNTIME_COMMAND` unset on the VPS. Keep GBrain's
+mechanical autopilot running, disable native provider-backed semantic phases
+that Hermes already owns (for example `cycle.propose_takes.enabled=false`), and
+let the Mac runtime perform proposal reasoning and bounded writes through MCP.
+This topology does not require a `hermes` executable inside the GBrain container.
+
+Configure the command adapter only when a same-host runtime executable or a
+purpose-built remote-runtime command is intentionally available to the worker.
+
 ## Wire protocol
 
 The public TypeScript types are available from the package subpath:
