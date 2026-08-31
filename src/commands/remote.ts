@@ -21,6 +21,7 @@
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult, RemoteMcpError } from '../core/mcp-client.ts';
 import type { DoctorReport, Check } from './doctor.ts';
+import { doctorSeverityLabel, resolveDoctorSeverity } from '../core/doctor-categories.ts';
 
 interface RemoteFlags {
   json: boolean;
@@ -238,12 +239,12 @@ function renderDoctorReport(report: DoctorReport): void {
   console.log('\nGBrain Health Check (remote host)');
   console.log('=================================');
   for (const c of report.checks) {
-    const icon = c.status === 'ok' ? 'OK' : c.status === 'warn' ? 'WARN' : 'FAIL';
+    const icon = doctorSeverityLabel(resolveDoctorSeverity(c));
     console.log(`  [${icon}] ${c.name}: ${c.message}`);
   }
   console.log(`\nHealth score: ${report.health_score}/100. Status: ${report.status}.`);
   if (report.status === 'unhealthy') {
-    const fails = report.checks.filter((c: Check) => c.status === 'fail');
+    const fails = report.checks.filter((c: Check) => resolveDoctorSeverity(c) === 'fail');
     if (fails.length > 0) {
       console.log('\nFailures:');
       for (const f of fails) console.log(`  - ${f.name}: ${f.message}`);

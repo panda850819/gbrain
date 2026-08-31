@@ -9,7 +9,13 @@ import { autoDetectSkillsDirReadOnly } from '../core/repo-root.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { compareVersions } from './migrations/index.ts';
 import { createProgress, startHeartbeat } from '../core/progress.ts';
-import { categorizeCheck, type CheckCategory } from '../core/doctor-categories.ts';
+import {
+  categorizeCheck,
+  doctorSeverityLabel,
+  resolveDoctorSeverity,
+  type CheckCategory,
+  type DoctorSeverity,
+} from '../core/doctor-categories.ts';
 import { rankIssues, type RankedIssue } from '../core/doctor-cause-rank.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import type { DbUrlSource } from '../core/config.ts';
@@ -232,6 +238,13 @@ export interface Check {
   status: 'ok' | 'warn' | 'fail';
   message: string;
   /**
+   * Additive triage signal. Existing consumers should continue reading
+   * `status`; scoring, ranking, and human rendering use this when present.
+   * `info`, `expected`, `coverage_gap`, and `needs_human` stay visible but do
+   * not represent a live production outage.
+   */
+  severity?: DoctorSeverity;
+  /**
    * v0.38: optional structured payload for checks that surface data
    * meant for programmatic consumption (e.g., cycle_phase_scope's
    * `phase_scope_map`). Mirrors `PhaseResult.details`. Most checks pack
@@ -275,13 +288,13 @@ export interface DoctorReport {
   schema_version: 2;
   status: 'healthy' | 'warnings' | 'unhealthy';
   /**
-   * Legacy all-checks aggregate. `100 − 20×fails − 5×warns`, floor 0.
+   * Aggregate of actionable checks. For checks without `severity`, this is
+   * the legacy `100 − 20×fails − 5×warns`, floor 0. Explicitly classified
+   * non-outage checks remain in `checks` but do not lower this score.
    *
-   * Preserved verbatim from pre-v0.41.19.0 for back-compat with `gbrain
-   * doctor --remediate`, `gbrain remote doctor`, the MCP `run_doctor` op,
-   * and any external monitor / CI gate that reads this field. NO behavior
-   * change: a fixed check set produces a byte-identical `health_score`
-   * before and after the v0.41.19.0 wave.
+   * Existing unclassified check sets remain byte-identical to the legacy
+   * result. The additive severity field is the explicit opt-in for the new
+   * non-outage behavior.
    */
   health_score: number;
   /**
@@ -308,9 +321,10 @@ export interface DoctorReport {
   };
   checks: Check[];
   /**
-   * v0.42.x (#1685 GAP C) — non-ok checks ranked by cause (root before symptom,
-   * fail before warn). Lets an agent act on the root cause without re-deriving
-   * the ranking. Additive + optional; schema_version stays at 2.
+   * v0.42.x (#1685 GAP C) — actionable checks ranked by cause (root before
+   * symptom, fail before warn). Lets an agent act on the root cause without
+   * re-deriving the ranking; non-actionable triage stays in `checks`. Additive
+   * + optional; schema_version stays at 2.
    */
   top_issues?: RankedIssue[];
   /**
@@ -325,8 +339,9 @@ export interface DoctorReport {
 function _penaltyScore(checks: Check[]): number {
   let score = 100;
   for (const c of checks) {
-    if (c.status === 'fail') score -= 20;
-    else if (c.status === 'warn') score -= 5;
+    const severity = resolveDoctorSeverity(c);
+    if (severity === 'fail') score -= 20;
+    else if (severity === 'warn') score -= 5;
   }
   return Math.max(0, score);
 }
@@ -338,7 +353,9 @@ function _penaltyScore(checks: Check[]): number {
  * means.
  *
  * **Back-compat invariant:** `health_score` math is byte-identical to
- * pre-v0.41.19.0 for any fixed `checks` array. The new fields are additive.
+ * pre-v0.41.19.0 for any fixed `checks` array with no explicit severity.
+ * Explicitly classified checks opt into non-outage triage and are additive in
+ * the JSON shape.
  *
  * **Categorization:** each check is tagged via `categorizeCheck(name)` at
  * report-build time if it doesn't already carry a `category` field. The
@@ -353,8 +370,8 @@ export function computeDoctorReport(
     c.category ? c : { ...c, category: categorizeCheck(c.name) },
   );
 
-  const hasFail = tagged.some((c) => c.status === 'fail');
-  const hasWarn = tagged.some((c) => c.status === 'warn');
+  const hasFail = tagged.some((c) => resolveDoctorSeverity(c) === 'fail');
+  const hasWarn = tagged.some((c) => resolveDoctorSeverity(c) === 'warn');
 
   const health_score = _penaltyScore(tagged);
   const brain = tagged.filter((c) => c.category === 'brain');
@@ -4223,7 +4240,8 @@ function outputResults(
   }
 
   for (const c of report.checks) {
-    const icon = c.status === 'ok' ? 'OK' : c.status === 'warn' ? 'WARN' : 'FAIL';
+    const severity = resolveDoctorSeverity(c);
+    const icon = doctorSeverityLabel(severity);
     console.log(`  [${icon}] ${c.name}: ${c.message}`);
     if (c.issues) {
       for (const issue of c.issues) {
@@ -4240,7 +4258,7 @@ function outputResults(
   // it's read out of the check list so we don't duplicate the query.
   const brainScoreCheck = report.checks.find((c) => c.name === 'brain_score');
   const brainScoreLine = brainScoreCheck
-    ? `Weighted brain score: ${brainScoreCheck.status === 'ok' ? '' : `[${brainScoreCheck.status.toUpperCase()}] `}${brainScoreCheck.message}`
+    ? `Weighted brain score: ${resolveDoctorSeverity(brainScoreCheck) === 'ok' ? '' : `[${resolveDoctorSeverity(brainScoreCheck).toUpperCase()}] `}${brainScoreCheck.message}`
     : null;
 
   console.log('');

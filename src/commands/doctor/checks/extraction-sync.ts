@@ -585,9 +585,9 @@ export async function computeExtractAtomsBacklogCheck(
       const backlogBySource = await countExtractAtomsBacklogBySource(engine, countExtractAtomsBacklog);
       const fix = buildExtractAtomsBacklogFixHint(backlogBySource);
       return {
-        name, status: 'warn',
-        message: `${backlog} pages eligible for atom extraction but the active pack does not run extract_atoms — backlog growing. Fix: ${fix}`,
-        details: { backlog, backlog_by_source: backlogBySource ?? undefined, pack_declares_phase: false, fix_hint: fix, known_approximation: approx },
+        name, status: 'warn', severity: 'coverage_gap',
+        message: `${backlog} pages eligible for atom extraction, but the active pack does not run extract_atoms — deferred because the semantic phase handoff is not configured. Backlog is retained. Fix: ${fix}`,
+        details: { backlog, backlog_by_source: backlogBySource ?? undefined, pack_declares_phase: false, fix_hint: fix, known_approximation: approx, triage_reason: 'semantic_phase_handoff_not_configured' },
       };
     }
 
@@ -602,9 +602,9 @@ export async function computeExtractAtomsBacklogCheck(
 
     // Not declared but below the warn threshold.
     return {
-      name, status: 'ok',
+      name, status: 'ok', severity: 'coverage_gap',
       message: `${backlog} page(s) eligible (below warn threshold; pack does not run extract_atoms)`,
-      details: { backlog, pack_declares_phase: false, known_approximation: approx },
+      details: { backlog, pack_declares_phase: false, known_approximation: approx, triage_reason: 'semantic_phase_handoff_not_configured' },
     };
   } catch (err) {
     return { name, status: 'warn', message: `extract_atoms_backlog check failed: ${(err as Error).message}` };

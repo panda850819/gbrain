@@ -599,6 +599,26 @@ export async function checkRerankerHealth(engine: BrainEngine): Promise<Check> {
       };
     }
 
+    // Reranker failures are historical audit rows when the feature is
+    // currently disabled. Keep the rows visible for audit, but do not make a
+    // disabled provider look like a live search outage.
+    if (!rerankerEnabled) {
+      const reasons = [...new Set(failures.map((failure) => failure.reason))];
+      return {
+        name: 'reranker_health',
+        status: 'warn',
+        severity: 'info',
+        message:
+          `Reranker disabled — ${failures.length} historical failure(s) retained for audit` +
+          `${reasons.length > 0 ? ` (${reasons.join(', ')})` : ''}; no current rerank calls are expected.`,
+        details: {
+          reranker_enabled: false,
+          historical_failures: failures.length,
+          historical_failure_reasons: reasons,
+        },
+      };
+    }
+
     const authFails = failures.filter((f) => f.reason === 'auth');
     if (authFails.length > 0) {
       return {
