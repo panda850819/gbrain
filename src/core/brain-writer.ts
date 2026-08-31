@@ -28,9 +28,14 @@ import {
   type ParseValidationCode,
   type ParseValidationError,
 } from './markdown.ts';
-import { isSyncable, pruneDir, slugifyPath } from './sync.ts';
+import { isMarkdownFilePath, isSyncable, pruneDir, slugifyPath } from './sync.ts';
 
 export type { ParseValidationCode };
+
+/** Frontmatter validation is defined only for Markdown page files. */
+export function isFrontmatterScannablePath(path: string): boolean {
+  return isMarkdownFilePath(path) && isSyncable(path, { strategy: 'markdown' });
+}
 
 export interface AuditFix {
   code: ParseValidationCode;
@@ -139,8 +144,21 @@ export function autoFixFrontmatter(
     fixes.push({ code: 'NULL_BYTES', description: 'Stripped null bytes' });
   }
 
-  // 2. MISSING_CLOSE — if there's an opener but no closer before a heading,
-  //    insert `---` immediately before the heading. Walk lines once.
+  // 2. MISSING_CLOSE — if there's an opener but no closer at all, insert
+  //    `---` immediately before the first heading-shaped line (best-effort
+  //    guess at where the frontmatter was meant to end).
+  //
+  //    Find the closer FIRST, scanning the full zone — do not stop at the
+  //    first `#`-prefixed line. A `#` line between the opening and closing
+  //    `---` is a YAML comment (comments are valid anywhere in a YAML
+  //    document), not a markdown heading; only the genuine absence of a
+  //    closing `---` counts as MISSING_CLOSE. Mirrors the fix applied to
+  //    the parseMarkdown validator in #2153 — this is the sibling
+  //    reimplementation in the auto-fixer and had the same bug (it broke
+  //    out of the scan on the first heading-shaped line, so a `#` comment
+  //    appearing before a real closing fence was misdetected as
+  //    MISSING_CLOSE and the fix inserted a spurious `---` that split
+  //    valid frontmatter in two, pushing the real keys into the body).
   {
     const lines = working.split('\n');
     let firstNonEmpty = -1;
@@ -149,24 +167,27 @@ export function autoFixFrontmatter(
     }
     if (firstNonEmpty >= 0 && lines[firstNonEmpty].trim() === '---') {
       let closeIdx = -1;
-      let headingIdx = -1;
       for (let i = firstNonEmpty + 1; i < lines.length; i++) {
-        const t = lines[i].trim();
-        if (t === '---') { closeIdx = i; break; }
-        if (/^#{1,6}\s/.test(t)) { headingIdx = i; break; }
+        if (lines[i].trim() === '---') { closeIdx = i; break; }
       }
-      if (closeIdx === -1 && headingIdx >= 0) {
-        const fixed = [
-          ...lines.slice(0, headingIdx),
-          '---',
-          '',
-          ...lines.slice(headingIdx),
-        ];
-        working = fixed.join('\n');
-        fixes.push({
-          code: 'MISSING_CLOSE',
-          description: `Inserted closing --- before heading at line ${headingIdx + 1}`,
-        });
+      if (closeIdx === -1) {
+        let headingIdx = -1;
+        for (let i = firstNonEmpty + 1; i < lines.length; i++) {
+          if (/^#{1,6}\s/.test(lines[i].trim())) { headingIdx = i; break; }
+        }
+        if (headingIdx >= 0) {
+          const fixed = [
+            ...lines.slice(0, headingIdx),
+            '---',
+            '',
+            ...lines.slice(headingIdx),
+          ];
+          working = fixed.join('\n');
+          fixes.push({
+            code: 'MISSING_CLOSE',
+            description: `Inserted closing --- before heading at line ${headingIdx + 1}`,
+          });
+        }
       }
     }
   }
@@ -296,7 +317,11 @@ export function autoFixFrontmatter(
     // the slug field is present and mismatched.
     const re = /^slug:\s*(.+?)\s*$/m;
     const m = working.match(re);
-    if (m && m[1].replace(/^["']|["']$/g, '') !== expectedSlug) {
+    // #3772: keep a normalization-equivalent slug (its slugified spelling IS
+    // the path-derived slug) — export stamps these to preserve legacy page
+    // identities, and stripping it here would re-key the page on next import.
+    const declaredSlug = m ? m[1].replace(/^["']|["']$/g, '') : '';
+    if (m && declaredSlug !== expectedSlug && slugifyPath(declaredSlug) !== expectedSlug) {
       working = working.replace(re, '').replace(/\n{3,}/g, '\n\n');
       fixes.push({
         code: 'SLUG_MISMATCH',
@@ -602,7 +627,10 @@ function scanOneSource(
     // visitDir is consulted from walkDir directly (passed below). The
     // per-file visit closure doesn't need it.
     const relPath = relative(rootResolved, absPath);
-    if (!isSyncable(relPath, { strategy: 'markdown' })) return true;
+    // Frontmatter is a Markdown-only contract. Multimodal sync deliberately
+    // admits images under the markdown strategy, but parsing JPEG/PNG bytes as
+    // UTF-8 turns ordinary binary NULs into false NULL_BYTES findings.
+    if (!isFrontmatterScannablePath(relPath)) return true;
     scanned++;
     let content: string;
     try {
@@ -740,7 +768,16 @@ async function listSources(engine: BrainEngine, sourceId?: string): Promise<Sour
     );
     return rows;
   }
-  return engine.executeRaw<SourceRow>(
-    `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
-  );
+  // #3880: archived sources are excluded from automatic all-source scanning.
+  // The archived column is v34+ — fall back on older brains (house style per
+  // pickSoleNonDefaultSource).
+  try {
+    return await engine.executeRaw<SourceRow>(
+      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL AND archived IS NOT TRUE ORDER BY id`,
+    );
+  } catch {
+    return engine.executeRaw<SourceRow>(
+      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL ORDER BY id`,
+    );
+  }
 }

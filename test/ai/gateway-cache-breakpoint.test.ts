@@ -29,13 +29,19 @@
  * the bug made you believe was sufficient.
  */
 
-import { describe, test, expect, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterAll } from 'bun:test';
 import {
   chat,
   configureGateway,
   resetGateway,
   __setGenerateTextTransportForTests,
 } from '../../src/core/ai/gateway.ts';
+import { OPENROUTER_CACHE_HEADER } from '../../src/core/ai/recipes/openrouter.ts';
+
+afterAll(() => {
+  resetGateway();
+  __setGenerateTextTransportForTests(null);
+});
 
 describe('gbrain#2490 — Anthropic cache breakpoint placement', () => {
   beforeEach(() => {
@@ -130,7 +136,13 @@ describe('gbrain#2490 — Anthropic cache breakpoint placement', () => {
     expect(args.tools).toBeUndefined();
   });
 
-  test('cacheSystem:true on a non-Anthropic model is silently ignored (supports_prompt_cache=false)', async () => {
+  test('cacheSystem:true on a recipe that declares no caching leaves system a bare string', async () => {
+    // This test needs SOME recipe that declares no caching; it is not a claim
+    // about what Google's API does. If this guard ever fails, that recipe was
+    // corrected — re-point the test at another undeclared one, don't delete it.
+    const { getProviderCapabilities } = await import('../../src/core/ai/capabilities.ts');
+    expect(getProviderCapabilities('google:gemini-1.5-pro').supportsPromptCaching).toBe(false);
+
     let captured: any;
     __setGenerateTextTransportForTests(async (args: any) => {
       captured = args;
@@ -141,18 +153,59 @@ describe('gbrain#2490 — Anthropic cache breakpoint placement', () => {
       } as any;
     });
     configureGateway({
-      chat_model: 'openai:gpt-4o-mini',
-      env: { OPENAI_API_KEY: 'fake' },
+      chat_model: 'google:gemini-1.5-pro',
+      env: { GOOGLE_GENERATIVE_AI_API_KEY: 'fake' },
     });
     await chat({
-      model: 'openai:gpt-4o-mini',
+      model: 'google:gemini-1.5-pro',
       system: 'SYS',
       cacheSystem: true,
       messages: [{ role: 'user', content: 'hello' }],
     });
-    // Still a bare string — the recipe doesn't support prompt caching, so
-    // useCache is false regardless of the caller's request.
+    // useCache is false regardless of the caller's request, so no breakpoint
+    // machinery runs at all.
     expect(captured.system).toBe('SYS');
+  });
+
+  test('an auto-caching provider gets the same shape the OpenRouter OpenAI route already gets', async () => {
+    // Native OpenAI and OpenRouter's openai/* routes are the same upstream
+    // models with the same automatic prefix caching, and
+    // `openrouterSupportsPromptCache` has always returned true for them. This
+    // pins that the native recipe now produces an identical breakpoint shape
+    // rather than a second, divergent one.
+    //
+    // The Anthropic-namespace marker rides along on both. It is inert off
+    // Anthropic: the AI SDK routes `providerOptions` by provider key, so an
+    // `anthropic` entry never reaches an OpenAI request body — the same
+    // reason the shipped OpenRouter OpenAI route can carry it safely.
+    const capture = async (model: string, env: Record<string, string>) => {
+      let captured: any;
+      __setGenerateTextTransportForTests(async (args: any) => {
+        captured = args;
+        return {
+          content: [{ type: 'text', text: 'ok' }],
+          finishReason: 'stop',
+          usage: { inputTokens: 1, outputTokens: 1 },
+        } as any;
+      });
+      configureGateway({ chat_model: model, env } as any);
+      await chat({
+        model,
+        system: 'SYS',
+        cacheSystem: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      });
+      return captured;
+    };
+
+    const viaOpenRouter = await capture('openrouter:openai/gpt-5.2', { OPENROUTER_API_KEY: 'fake' });
+    const native = await capture('openai:gpt-4o-mini', { OPENAI_API_KEY: 'fake' });
+
+    expect(native.system).toEqual(viaOpenRouter.system);
+    expect(native.providerOptions?.anthropic).toEqual(viaOpenRouter.providerOptions?.anthropic);
+    // Native OpenAI additionally carries its own routing hint, which is gated
+    // on the recipe implementation and not on this flag.
+    expect(native.providerOptions?.openai?.promptCacheKey).toBeString();
   });
 
   test('a configured cacheControl TTL override applies to every breakpoint, not just the call-level one', async () => {
@@ -191,5 +244,71 @@ describe('gbrain#2490 — Anthropic cache breakpoint placement', () => {
     expect(captured.providerOptions?.anthropic?.cacheControl).toEqual(expected);
     expect((captured.system as any)?.providerOptions?.anthropic?.cacheControl).toEqual(expected);
     expect(captured.tools?.search?.providerOptions?.anthropic?.cacheControl).toEqual(expected);
+  });
+});
+
+describe('OpenRouter prompt caching (takeover of PR #1988)', () => {
+  beforeEach(() => {
+    resetGateway();
+    __setGenerateTextTransportForTests(null);
+  });
+
+  async function captureOpenRouterArgs(model: string, cacheSystem: boolean): Promise<any> {
+    let captured: any;
+    __setGenerateTextTransportForTests(async (args: any) => {
+      captured = args;
+      return {
+        content: [{ type: 'text', text: 'ok' }],
+        finishReason: 'stop',
+        usage: { inputTokens: 1, outputTokens: 1 },
+      } as any;
+    });
+    configureGateway({
+      chat_model: model,
+      env: { OPENROUTER_API_KEY: 'fake' },
+    });
+    await chat({
+      model,
+      system: 'stable system prompt',
+      cacheSystem,
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    return captured;
+  }
+
+  test('cacheSystem:true on an OpenRouter Claude route threads the private marker header to the compat fetch shim', async () => {
+    const args = await captureOpenRouterArgs('openrouter:anthropic/claude-sonnet-4.6', true);
+    expect(args.headers).toEqual({ [OPENROUTER_CACHE_HEADER]: '1' });
+  });
+
+  test('cacheSystem:false on an OpenRouter Claude route sends no marker header', async () => {
+    const args = await captureOpenRouterArgs('openrouter:anthropic/claude-sonnet-4.6', false);
+    expect(args.headers).toBeUndefined();
+  });
+
+  test('cacheSystem:true on an OpenRouter OpenAI route needs no marker (OR caches OpenAI automatically)', async () => {
+    const args = await captureOpenRouterArgs('openrouter:openai/gpt-5.2', true);
+    expect(args.headers).toBeUndefined();
+  });
+
+  test('cacheSystem:true on a non-cacheable OpenRouter route is silently ignored', async () => {
+    // A family the predicate does not list, so useCache stays false.
+    const args = await captureOpenRouterArgs('openrouter:google/gemini-3-flash-preview', true);
+    expect(args.headers).toBeUndefined();
+    // useCache is false → system stays a bare string.
+    expect(args.system).toBe('stable system prompt');
+  });
+
+  test('a cacheable-but-implicit OpenRouter route gets the breakpoint without the rewrite header', async () => {
+    // DeepSeek routes cache automatically: the marker rides along (inert off
+    // Anthropic) but the fetch shim's rewrite header must NOT be set, since
+    // only Anthropic Claude routes need the explicit cache_control block.
+    const args = await captureOpenRouterArgs('openrouter:deepseek/deepseek-chat', true);
+    expect(args.headers).toBeUndefined();
+    expect(args.system).toEqual({
+      role: 'system',
+      content: 'stable system prompt',
+      providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+    });
   });
 });

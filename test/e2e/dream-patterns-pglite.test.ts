@@ -25,7 +25,6 @@
 import { describe, test, expect } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { runPhasePatterns } from '../../src/core/cycle/patterns.ts';
-import { loadDreamWriteTargets, loadOutputRoot } from '../../src/core/cycle/synthesize.ts';
 import { withoutAnthropicKey } from '../helpers/no-anthropic-key.ts';
 
 interface TestRig {
@@ -50,14 +49,11 @@ async function setupRig(): Promise<TestRig> {
 /**
  * Insert N reflection pages directly via engine.putPage so the patterns
  * gather query has data without going through the synthesize phase.
- * Slugs are built from the resolved reflections write target so the seed
- * matches whatever `skills/_brain-filing-rules.json` declares (default
- * `wiki/personal/reflections`), instead of hardcoding one taxonomy.
+ * Slugs follow the v0.23 wiki/personal/reflections/<topic>-<hash> shape.
  */
 async function seedReflections(engine: PGLiteEngine, count: number): Promise<void> {
-  const targets = await loadDreamWriteTargets(engine, await loadOutputRoot(engine));
   for (let i = 0; i < count; i++) {
-    const slug = `${targets.reflections}/2026-04-${String(15 + i).padStart(2, '0')}-test-pattern-aaa${i}`;
+    const slug = `wiki/personal/reflections/2026-04-${String(15 + i).padStart(2, '0')}-test-pattern-aaa${i}`;
     await engine.putPage(slug, {
       type: 'note',
       title: `Reflection ${i}`,

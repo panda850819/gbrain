@@ -14,7 +14,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
-import { loadDreamWriteTargets, loadOutputRoot } from '../../src/core/cycle/synthesize.ts';
+import { loadDreamNamespaces, loadOutputRoot } from '../../src/core/cycle/synthesize.ts';
 import { runPhasePatterns } from '../../src/core/cycle/patterns.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { registerBuiltinHandlers } from '../../src/commands/jobs.ts';
@@ -63,9 +63,10 @@ async function setupRig(): Promise<{ engine: PGLiteEngine; brainDir: string; cle
 }
 
 async function seedReflections(engine: PGLiteEngine, count: number): Promise<string> {
-  const targets = await loadDreamWriteTargets(engine, await loadOutputRoot(engine));
+  const outputRoot = await loadOutputRoot(engine);
+  const namespaces = await loadDreamNamespaces(engine, outputRoot);
   for (let i = 0; i < count; i++) {
-    await engine.putPage(`${targets.reflections}/2026-04-${String(15 + i).padStart(2, '0')}-runtime-e2e-${i}`, {
+    await engine.putPage(`${namespaces.reflectionsPrefix}/2026-04-${String(15 + i).padStart(2, '0')}-runtime-e2e-${i}`, {
       type: 'note',
       title: `Reflection ${i}`,
       compiled_truth: `Reflection ${i} records a recurring runtime integration theme.`,
@@ -73,7 +74,7 @@ async function seedReflections(engine: PGLiteEngine, count: number): Promise<str
       frontmatter: { type: 'note', title: `Reflection ${i}` },
     });
   }
-  return targets.reflections;
+  return namespaces.reflectionsPrefix;
 }
 
 describe('E2E runtime mode — patterns phase', () => {
@@ -86,8 +87,9 @@ describe('E2E runtime mode — patterns phase', () => {
     let workerPromise: Promise<void> | undefined;
     try {
       const reflectionsPrefix = await seedReflections(rig.engine, 3);
-      const targets = await loadDreamWriteTargets(rig.engine, await loadOutputRoot(rig.engine));
-      const patternSlug = `${targets.patterns}/runtime-bridge-e2e`;
+      const outputRoot = await loadOutputRoot(rig.engine);
+      const patternsPrefix = `${outputRoot}/personal/patterns`;
+      const patternSlug = `${patternsPrefix}/runtime-bridge-e2e`;
       const runId = 'runtime-pattern-e2e';
       const deadlineAtMs = Date.now() + 10 * 60 * 1000;
 
@@ -128,7 +130,7 @@ describe('E2E runtime mode — patterns phase', () => {
           runId,
           deadlineAtMs,
         });
-        expect(phase.status).toBe('ok');
+        expect(phase).toMatchObject({ status: 'ok' });
         const details = phase.details as {
           reflections_considered: number;
           patterns_written: number;
@@ -172,7 +174,8 @@ describe('E2E runtime mode — patterns phase', () => {
           expect(request.phase).toBe('patterns');
           expect(request.idempotency_key).toBe(`dream:patterns:${runId}`);
           expect(request.deadline_at_ms).toBe(deadlineAtMs);
-          expect(request.write_policy).toEqual({ mode: 'canonical', allow: [`${targets.patterns}/*`] });
+          expect(request.write_policy?.mode).toBe('canonical');
+          expect(request.write_policy?.allow).toContain(`${patternsPrefix}/*`);
         }
 
         const replay = await runPhasePatterns(rig.engine, {

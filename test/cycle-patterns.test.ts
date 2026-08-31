@@ -10,7 +10,8 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'fs';
-import { defaultDreamWriteTargets } from '../src/core/cycle/synthesize.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { __testing } from '../src/core/cycle/patterns.ts';
 
 const patternsSrc = readFileSync(
   new URL('../src/core/cycle/patterns.ts', import.meta.url),
@@ -19,8 +20,13 @@ const patternsSrc = readFileSync(
 
 describe('patterns phase wiring', () => {
   test('imports queue + waitForCompletion + types', () => {
-    expect(patternsSrc).toContain("import { MinionQueue }");
-    expect(patternsSrc).toContain('waitForCompletion');
+    expect(patternsSrc).toContain("import { DEFAULT_PRIVATE_QUEUE_LEASE_MS, MinionQueue }");
+    // The post-drain wait must be the lease-renewing variant — a plain
+    // waitForCompletion would let the private-queue lease lapse mid-wait.
+    expect(patternsSrc).toContain('waitForCompletionRenewing');
+    // The keepalive must come from the shared throttled factory (T0
+    // extraction) — an inline closure here and in synthesize drifts.
+    expect(patternsSrc).toContain('makeThrottledLeaseRenewer');
     expect(patternsSrc).toContain('SubagentHandlerData');
   });
 
@@ -75,26 +81,37 @@ describe('patterns phase wiring', () => {
 });
 
 describe('patterns scope filter', () => {
-  test('filters reflections by a bound slug-prefix parameter', () => {
-    // #2415 made the namespace ROOT configurable; dream_write_targets makes
-    // the whole reflections prefix configurable. What stays pinned: the scope
-    // filter is a BOUND parameter (never interpolated), and the prefix comes
-    // from the resolved write target rather than a literal.
+  test('reflection excerpts never split a UTF-16 surrogate pair', async () => {
+    const rocket = '\uD83D\uDE80';
+    const compiledTruth = `${'a'.repeat(599)}${rocket}tail`;
+    const engine = {
+      executeRaw: async () => [{
+        slug: 'wiki/personal/reflections/example',
+        title: 'Example',
+        compiled_truth: compiledTruth,
+      }],
+    } as unknown as BrainEngine;
+
+    const [reflection] = await __testing.gatherReflections(engine, 30);
+
+    expect(reflection.excerpt.isWellFormed()).toBe(true);
+    expect(reflection.excerpt.endsWith(rocket)).toBe(false);
+    expect(reflection.excerpt.length).toBe(599);
+  });
+
+  test('filters reflections by slug LIKE <source_slug_prefix>/%', () => {
+    // #2415 made the top-level namespace root configurable
+    // (dream.synthesize.output_root, default 'wiki'). A later patch made the
+    // full `personal/reflections` sub-path configurable too
+    // (dream.patterns.source_slug_prefix, defaults to
+    // `<output_root>/personal/reflections` so existing behavior is
+    // unchanged) — schemas with no `personal/` nesting (e.g. a flat
+    // `meetings/` tree) can point the phase at their own compiled_truth
+    // source instead.
     expect(patternsSrc).toContain('slug LIKE $2');
-    expect(patternsSrc).toContain('`${targets.reflections}/%`');
-    expect(patternsSrc).not.toContain("slug LIKE '");
+    expect(patternsSrc).toContain('${sourceSlugPrefix}/%');
+    expect(patternsSrc).toContain('dream.patterns.source_slug_prefix');
   });
-
-  test('undeclared targets keep the pre-existing upstream reflection path', () => {
-    // Behavioural guard for the default path the literal used to pin.
-    expect(defaultDreamWriteTargets('wiki').reflections).toBe('wiki/personal/reflections');
-    expect(defaultDreamWriteTargets('notes').reflections).toBe('notes/personal/reflections');
-  });
-
-  // Behavioural coverage for the soft-delete guard and for a configured
-  // write target relocating the gather scope lives in
-  // test/cycle-dream-output-root.test.ts (PGLite-backed). A source-string
-  // grep here would go green on a refactor that dropped the guard.
 
   test('orders by updated_at DESC for recency-bias', () => {
     expect(patternsSrc).toContain('ORDER BY updated_at DESC');
@@ -102,5 +119,23 @@ describe('patterns scope filter', () => {
 
   test('caps gather to 100 reflections (cost control)', () => {
     expect(patternsSrc).toContain('LIMIT 100');
+  });
+
+  test('output slug prefix is config-driven, defaulting to <output_root>/personal/patterns', () => {
+    expect(patternsSrc).toContain('dream.patterns.output_slug_prefix');
+    expect(patternsSrc).toContain('${outputRoot}/personal/patterns');
+  });
+
+  test('source slug prefix defaults to <output_root>/personal/reflections', () => {
+    expect(patternsSrc).toContain('${outputRoot}/personal/reflections');
+  });
+
+  test('adds a configured output_slug_prefix to the subagent write allow-list', () => {
+    // A custom dream.patterns.output_slug_prefix (e.g. a flat schema with no
+    // personal/ nesting) is not covered by the filing-rules globs, which only
+    // remap the `wiki/personal/patterns/*` literal by output_root. The phase
+    // must add it explicitly so put_page actually grants write access there.
+    expect(patternsSrc).toContain('outputGlob');
+    expect(patternsSrc).toContain('allowedSlugPrefixes.push(outputGlob)');
   });
 });
