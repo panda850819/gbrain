@@ -38,10 +38,16 @@ import type { Page, PageType } from '../types.ts';
 // data-dir, on Postgres because the parent phase itself occupies a worker
 // slot and can deadlock a fully-occupied worker (#2050). synthesize.ts
 // drains its own children the same way.
-import { loadAllowedSlugPrefixes, loadOutputRoot, runSubagentsInline } from './synthesize.ts';
+import {
+  loadAllowedSlugPrefixes,
+  loadOutputRoot,
+  normalizeDreamNamespace,
+  runSubagentsInline,
+} from './synthesize.ts';
 import { probeChatModel } from '../ai/gateway.ts';
 import { normalizeModelId } from '../model-id.ts';
 import { throwIfAborted } from '../abort-check.ts';
+import { matchesSlugAllowList } from '../ops/context.ts';
 
 export interface PatternsPhaseOpts {
   brainDir: string;
@@ -144,7 +150,26 @@ export async function runPhasePatterns(
       );
     }
 
-    // Gather reflections within lookback window.
+    // Validate DB-plane targets against the operator-owned file BEFORE the
+    // source prefix reaches SQL. Config can choose an approved lane, but it
+    // cannot broaden either read scope or subagent write access by itself.
+    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot, engine);
+    if (allowedSlugPrefixes.length === 0) {
+      return failed(makeError('InternalError', 'NO_ALLOWLIST',
+        'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
+    }
+    for (const target of [config.sourceSlugPrefix, config.outputSlugPrefix]) {
+      if (!matchesSlugAllowList(`${target}/__dream_policy_probe__`, allowedSlugPrefixes)) {
+        return failed(makeError(
+          'ValidationError',
+          'WRITE_TARGET_OUTSIDE_ALLOWLIST',
+          `dream patterns target "${target}" is not approved by dream_synthesize_paths.globs`,
+          'Add the exact target glob to the brain repo filing rules before changing dream.write_targets.',
+        ));
+      }
+    }
+
+    // Gather reflections within the already-approved lookback namespace.
     const reflections = await gatherReflections(engine, config.lookbackDays, config.sourceSlugPrefix);
     if (reflections.length < config.minEvidence) {
       return skipped(
@@ -175,22 +200,6 @@ export async function runPhasePatterns(
     const probe = probeChatModel(normalizeModelId(config.model));
     if (!probe.ok) {
       return skipped('no_provider', `pattern detection skipped: ${probe.detail}`);
-    }
-
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot, engine);
-    if (allowedSlugPrefixes.length === 0) {
-      return failed(makeError('InternalError', 'NO_ALLOWLIST',
-        'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
-    }
-    // A configured dream.patterns.output_slug_prefix diverging from the
-    // default `${outputRoot}/personal/patterns` composition (e.g. a flat
-    // schema with no personal/ nesting) is not covered by the filing-rules
-    // globs above, which only remap the `wiki/personal/patterns/*` literal
-    // by outputRoot. Add it explicitly so the subagent's put_page allow-list
-    // actually grants write access to wherever it's configured to write.
-    const outputGlob = `${config.outputSlugPrefix}/*`;
-    if (!allowedSlugPrefixes.includes(outputGlob)) {
-      allowedSlugPrefixes.push(outputGlob);
     }
 
     // #2781: budget the subagent from the REMAINING parent-job time, not
@@ -421,12 +430,22 @@ async function getNumberConfig(engine: BrainEngine, key: string, fallback: numbe
   return Number.isNaN(value) ? fallback : value;
 }
 
-/** Trims leading/trailing slashes from a config-supplied slug prefix; falls back to `fallback` when unset or empty after trimming. */
-async function getSlugPrefixConfig(engine: BrainEngine, key: string, fallback: string): Promise<string> {
-  const raw = await engine.getConfig(key);
+/**
+ * Trims leading/trailing slashes from a config-supplied slug prefix. The
+ * downstream dream.write_targets key remains authoritative so upgrading does
+ * not silently move an existing brain back under wiki/.
+ */
+async function getSlugPrefixConfig(
+  engine: BrainEngine,
+  key: string,
+  legacyKey: string,
+  outputRoot: string,
+  fallback: string,
+): Promise<string> {
+  const canonical = await engine.getConfig(legacyKey);
+  const raw = canonical || await engine.getConfig(key);
   if (!raw) return fallback;
-  const trimmed = raw.trim().replace(/^\/+|\/+$/g, '');
-  return trimmed || fallback;
+  return normalizeDreamNamespace(raw, canonical ? legacyKey : key, outputRoot, fallback);
 }
 
 async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> {
@@ -450,10 +469,18 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
     model,
     outputRoot,
     sourceSlugPrefix: await getSlugPrefixConfig(
-      engine, 'dream.patterns.source_slug_prefix', `${outputRoot}/personal/reflections`,
+      engine,
+      'dream.patterns.source_slug_prefix',
+      'dream.write_targets.reflections',
+      outputRoot,
+      `${outputRoot}/personal/reflections`,
     ),
     outputSlugPrefix: await getSlugPrefixConfig(
-      engine, 'dream.patterns.output_slug_prefix', `${outputRoot}/personal/patterns`,
+      engine,
+      'dream.patterns.output_slug_prefix',
+      'dream.write_targets.patterns',
+      outputRoot,
+      `${outputRoot}/personal/patterns`,
     ),
     subagentTimeoutMs: await getNumberConfig(
       engine, 'dream.patterns.subagent_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_TIMEOUT_MS,

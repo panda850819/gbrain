@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
@@ -85,10 +85,28 @@ describe('E2E runtime mode — patterns phase', () => {
     writeFileSync(requestLogPath, '');
     let worker: MinionWorker | undefined;
     let workerPromise: Promise<void> | undefined;
+    const originalCwd = process.cwd();
+    const foreignCwd = mkdtempSync(join(tmpdir(), 'gbrain-runtime-foreign-cwd-'));
     try {
+      mkdirSync(join(rig.brainDir, 'skills'), { recursive: true });
+      writeFileSync(
+        join(rig.brainDir, 'skills', '_brain-filing-rules.json'),
+        JSON.stringify({ dream_synthesize_paths: { globs: [
+          'reflections/dreams/*',
+          'learnings/patterns/*',
+        ] } }),
+      );
+      await rig.engine.setConfig('sync.repo_path', rig.brainDir);
+      process.chdir(foreignCwd);
+      // Compatibility path from the downstream canonical-filing patch. The
+      // canonical dream.write_targets remain authoritative so existing brains
+      // keep their taxonomy through this merge.
+      await rig.engine.setConfig('dream.write_targets.reflections', 'reflections/dreams');
+      await rig.engine.setConfig('dream.write_targets.patterns', 'learnings/patterns');
+      await rig.engine.setConfig('dream.patterns.source_slug_prefix', 'upstream/reflections');
+      await rig.engine.setConfig('dream.patterns.output_slug_prefix', 'upstream/patterns');
       const reflectionsPrefix = await seedReflections(rig.engine, 3);
-      const outputRoot = await loadOutputRoot(rig.engine);
-      const patternsPrefix = `${outputRoot}/personal/patterns`;
+      const patternsPrefix = 'learnings/patterns';
       const patternSlug = `${patternsPrefix}/runtime-bridge-e2e`;
       const runId = 'runtime-pattern-e2e';
       const deadlineAtMs = Date.now() + 10 * 60 * 1000;
@@ -216,10 +234,12 @@ describe('E2E runtime mode — patterns phase', () => {
         expect(replayToolRows[0]!.status).toBe('complete');
       });
     } finally {
+      process.chdir(originalCwd);
       worker?.stop();
       if (workerPromise) await workerPromise;
       await rig.cleanup();
       rmSync(requestLog, { recursive: true, force: true });
+      rmSync(foreignCwd, { recursive: true, force: true });
     }
   }, 60_000);
 

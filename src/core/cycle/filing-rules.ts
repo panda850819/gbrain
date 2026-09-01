@@ -136,25 +136,13 @@ export interface DreamNamespaceGlobs {
 }
 
 /**
- * #4117: derive allow-list globs from the configured per-lane namespaces so
- * a custom `dream.synthesize.{reflections,originals}_slug_prefix` is
- * actually writable (the prompt tells the subagent to write there; put_page
- * enforces this list server-side). FAIL-CLOSED on both edges:
- *   - an empty base list stays empty — the NO_ALLOWLIST hard failure in the
- *     phases must survive, a namespace config can never resurrect a broken
- *     operator file into a partial allow-list;
- *   - only validated prefixes reach this function, so a garbage config value
- *     can never mint a glob.
+ * Preserve the namespace argument for API compatibility, but never derive
+ * authority from it. `dream_synthesize_paths.globs` is the operator-owned
+ * trust boundary; phase code separately rejects configured targets that the
+ * loaded globs do not already cover.
  */
-function appendNamespaceGlobs(globs: string[], ns?: DreamNamespaceGlobs): string[] {
-  if (!ns || globs.length === 0) return globs;
-  const out = [...globs];
-  for (const prefix of [ns.reflectionsPrefix, ns.originalsPrefix]) {
-    if (!prefix) continue;
-    const glob = `${prefix}/*`;
-    if (!out.includes(glob)) out.push(glob);
-  }
-  return out;
+function appendNamespaceGlobs(globs: string[], _ns?: DreamNamespaceGlobs): string[] {
+  return globs;
 }
 
 /** Test seam for the candidate-ladder semantics (both fail arms) + #4117 glob derivation. */

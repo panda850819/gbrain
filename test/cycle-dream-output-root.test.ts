@@ -149,6 +149,17 @@ describe('#2415: loadOutputRoot validation + patterns gather scope', () => {
     expect(result.status).toBe('ok');
     expect(result.details?.reflections_considered).toBe(3);
   });
+
+  test('patterns rejects an unapproved DB target before it reaches SQL', async () => {
+    await engine.setConfig('dream.write_targets.reflections', 'reflections/dreams');
+    try {
+      const result = await runPhasePatterns(engine, { brainDir: '/tmp', dryRun: true });
+      expect(result.status).toBe('fail');
+      expect(result.error?.code).toBe('WRITE_TARGET_OUTSIDE_ALLOWLIST');
+    } finally {
+      await engine.unsetConfig('dream.write_targets.reflections');
+    }
+  });
 });
 
 describe('#2397: allow-list resolution ladder (engine repo beats compiled-binary miss)', () => {
@@ -335,6 +346,35 @@ describe('#4216: buildSynthesisPrompt manifest + allow-list blocks', () => {
   });
 });
 
+// ── Eval write-path fix wave: OUTPUT POLICY rules 1/6/7 (F1a/F3/F4a) ──────
+// These pins are NEW — rule 1's verbatim mandate was previously untested.
+// They freeze the load-bearing prompt text the Cat 35 benchmark measures
+// (quote fidelity, fact retention, grounding); rewording needs a deliberate
+// test edit, not a drive-by.
+
+describe('eval fix wave: quote/fact/grounding mandates in OUTPUT POLICY', () => {
+  test('rule 1 carries the verbatim mandate AND the no-fake-quotes escape hatch', () => {
+    const prompt = buildSynthesisPrompt(transcript, 'chunk', 0, 1);
+    expect(prompt).toContain('Quote the user verbatim.');
+    expect(prompt).toContain('Quotation marks are ONLY for spans reproducible EXACTLY from the transcript below');
+    expect(prompt).toContain('paraphrase it WITHOUT quotation marks');
+  });
+
+  test('rule 6 is the salience-scoped fact-retention mandate (never a noise invitation)', () => {
+    const prompt = buildSynthesisPrompt(transcript, 'chunk', 0, 1);
+    expect(prompt).toContain('Preserve concrete facts');
+    expect(prompt).toContain('numbers, dates, dollar amounts, names, and who-decided-what OF the salient content');
+    expect(prompt).toContain('Do not add routine logistics for their own sake.');
+  });
+
+  test('rule 7 grounds claims and bans invented completion states', () => {
+    const prompt = buildSynthesisPrompt(transcript, 'chunk', 0, 1);
+    expect(prompt).toContain('Ground every claim in the transcript.');
+    expect(prompt).toContain('Attribute speculation as speculation');
+    expect(prompt).toContain('never state a completion state or outcome the transcript does not show');
+  });
+});
+
 // ── #4117: per-lane dream namespaces ────────────────────────────────────
 
 describe('#4117: dream.synthesize.{reflections,originals}_slug_prefix', () => {
@@ -371,6 +411,41 @@ describe('#4117: dream.synthesize.{reflections,originals}_slug_prefix', () => {
     }
   });
 
+  test('legacy dream.write_targets remain compatible after the upstream merge', async () => {
+    await nsEngine.setConfig('dream.write_targets.reflections', 'reflections/dreams');
+    await nsEngine.setConfig('dream.write_targets.originals', 'originals');
+    try {
+      const ns = await loadDreamNamespaces(nsEngine, 'wiki');
+      expect(ns.reflectionsPrefix).toBe('reflections/dreams');
+      expect(ns.originalsPrefix).toBe('originals');
+    } finally {
+      await nsEngine.unsetConfig('dream.write_targets.reflections');
+      await nsEngine.unsetConfig('dream.write_targets.originals');
+    }
+  });
+
+  test('canonical write targets take precedence over upstream lane-specific keys', async () => {
+    await nsEngine.setConfig('dream.write_targets.reflections', 'reflections/dreams');
+    await nsEngine.setConfig('dream.synthesize.reflections_slug_prefix', 'journal/daily');
+    try {
+      const ns = await loadDreamNamespaces(nsEngine, 'wiki');
+      expect(ns.reflectionsPrefix).toBe('reflections/dreams');
+    } finally {
+      await nsEngine.unsetConfig('dream.write_targets.reflections');
+      await nsEngine.unsetConfig('dream.synthesize.reflections_slug_prefix');
+    }
+  });
+
+  test('a namespace-root target fails closed instead of widening subagent writes', async () => {
+    await nsEngine.setConfig('dream.write_targets.reflections', 'wiki/*');
+    try {
+      const ns = await loadDreamNamespaces(nsEngine, 'wiki');
+      expect(ns.reflectionsPrefix).toBe('wiki/personal/reflections');
+    } finally {
+      await nsEngine.unsetConfig('dream.write_targets.reflections');
+    }
+  });
+
   test('an invalid prefix warns and falls back (never leaks into prompt/allow-list)', async () => {
     await nsEngine.setConfig('dream.synthesize.originals_slug_prefix', 'NOT a/valid slug!!');
     try {
@@ -392,14 +467,13 @@ describe('#4117: dream.synthesize.{reflections,originals}_slug_prefix', () => {
     expect(prompt).not.toContain('wiki/originals/ideas/');
   });
 
-  test('loadAllowedSlugPrefixes derives globs for custom namespaces', async () => {
+  test('DB namespace config never mints new allow-list globs', async () => {
     const globs = await loadAllowedSlugPrefixes('wiki', undefined, {
       reflectionsPrefix: 'journal/daily',
       originalsPrefix: 'sparks/ideas',
     });
-    expect(globs).toContain('journal/daily/*');
-    expect(globs).toContain('sparks/ideas/*');
-    // Base globs survive (the filing-rules file stays authoritative).
+    expect(globs).not.toContain('journal/daily/*');
+    expect(globs).not.toContain('sparks/ideas/*');
     expect(globs).toContain('wiki/personal/reflections/*');
   });
 

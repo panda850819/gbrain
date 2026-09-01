@@ -2387,7 +2387,7 @@ export const MIGRATIONS: Migration[] = [
           entity_slug       TEXT,
           fact              TEXT        NOT NULL,
           kind              TEXT        NOT NULL DEFAULT 'fact'
-                            CHECK (kind IN ('event','preference','commitment','belief','fact')),
+                            CHECK (kind IN ('event','preference','commitment','belief','fact','idea')),
           visibility        TEXT        NOT NULL DEFAULT 'private'
                             CHECK (visibility IN ('private','world')),
           notability        TEXT        NOT NULL DEFAULT 'medium'
@@ -6408,6 +6408,56 @@ export const MIGRATIONS: Migration[] = [
         );
       }
       process.stderr.write(`  v144 skew guard: takes.embedding resized to vector(${embeddingDim})\n`);
+    },
+  },
+  {
+    version: 145,
+    name: 'facts_kind_idea_alter',
+    // Widen facts.kind with 'idea' (extractor/DB taxonomy only — the frozen
+    // MEMORY_VERBS remember enum in src/core/verbs.ts does NOT gain it).
+    // Keep validation OUTSIDE the ACCESS EXCLUSIVE swap transaction: first
+    // add a differently named NOT VALID replacement and commit; the handler
+    // validates it in its own transaction (weaker lock), then briefly drops
+    // the old constraint and renames the validated replacement. A crash at
+    // any boundary resumes idempotently while the old constraint keeps
+    // protecting writes until the final swap.
+    idempotent: true,
+    sql: `
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'facts_kind_check'
+            AND conrelid = 'facts'::regclass
+            AND pg_get_constraintdef(oid) LIKE '%idea%'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'facts_kind_check_v145'
+            AND conrelid = 'facts'::regclass
+        ) THEN
+          ALTER TABLE facts ADD CONSTRAINT facts_kind_check_v145
+            CHECK (kind IN ('event','preference','commitment','belief','fact','idea')) NOT VALID;
+        END IF;
+      END $$;
+    `,
+    handler: async (engine) => {
+      const replacement = await engine.executeRaw<{ present: number }>(`
+        SELECT 1 AS present FROM pg_constraint
+         WHERE conname = 'facts_kind_check_v145'
+           AND conrelid = 'facts'::regclass
+      `);
+      if (replacement.length === 0) return;
+
+      // Separate autocommit statement: validation no longer extends the
+      // ACCESS EXCLUSIVE lock held by ADD/DROP/RENAME.
+      await engine.executeRaw(
+        'ALTER TABLE facts VALIDATE CONSTRAINT facts_kind_check_v145',
+      );
+      await engine.executeRaw(`
+        DO $$ BEGIN
+          ALTER TABLE facts DROP CONSTRAINT IF EXISTS facts_kind_check;
+          ALTER TABLE facts RENAME CONSTRAINT facts_kind_check_v145 TO facts_kind_check;
+        END $$;
+      `);
     },
   },
 ];
