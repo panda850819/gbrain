@@ -153,7 +153,12 @@ export async function runPhasePatterns(
     // Validate DB-plane targets against the operator-owned file BEFORE the
     // source prefix reaches SQL. Config can choose an approved lane, but it
     // cannot broaden either read scope or subagent write access by itself.
-    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot, engine);
+    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(
+      config.outputRoot,
+      engine,
+      undefined,
+      opts.sourceId ?? 'default',
+    );
     if (allowedSlugPrefixes.length === 0) {
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
