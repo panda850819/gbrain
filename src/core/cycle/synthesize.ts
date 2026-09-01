@@ -587,7 +587,7 @@ async function runPhaseSynthesizeInner(
     const allowedSlugPrefixes = await loadAllowedSlugPrefixes(config.outputRoot, engine, {
       reflectionsPrefix: config.reflectionsPrefix,
       originalsPrefix: config.originalsPrefix,
-    });
+    }, opts.sourceId ?? 'default');
     if (allowedSlugPrefixes.length === 0) {
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));

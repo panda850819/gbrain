@@ -170,9 +170,11 @@ describe('#2397: allow-list resolution ladder (engine repo beats compiled-binary
   // through the engine (sync.repo_path, else default-source local_path)
   // and, as a last rung, falls back to the statically-bundled JSON.
   let engine: PGLiteEngine;
-  let repoA: string;      // rung 2a: config sync.repo_path
-  let repoB: string;      // rung 2b: default-source local_path
-  let foreignCwd: string; // simulates the worker's non-brain-repo cwd
+  let repoA: string;       // default source: config sync.repo_path
+  let repoB: string;       // default source: sources.local_path
+  let repoC: string;       // non-default active source checkout
+  let foreignCwd: string;  // no filing rules present
+  let packagedCwd: string; // simulates /app with packaged filing rules
 
   const writeRules = (repo: string, globs: string[]) => {
     mkdirSync(join(repo, 'skills'), { recursive: true });
@@ -182,20 +184,25 @@ describe('#2397: allow-list resolution ladder (engine repo beats compiled-binary
     );
   };
 
-  const inForeignCwd = async <T>(fn: () => Promise<T>): Promise<T> => {
+  const inCwd = async <T>(cwd: string, fn: () => Promise<T>): Promise<T> => {
     const prev = process.cwd();
-    process.chdir(foreignCwd);
+    process.chdir(cwd);
     try { return await fn(); } finally { process.chdir(prev); }
   };
+  const inForeignCwd = <T>(fn: () => Promise<T>): Promise<T> => inCwd(foreignCwd, fn);
 
   beforeAll(async () => {
     // Temp dirs first so afterAll cleanup never sees undefined paths even
     // if the (load-sensitive) PGLite init times out.
     repoA = mkdtempSync(join(tmpdir(), 'gbrain-2397-repoA-'));
     repoB = mkdtempSync(join(tmpdir(), 'gbrain-2397-repoB-'));
+    repoC = mkdtempSync(join(tmpdir(), 'gbrain-2397-repoC-'));
     foreignCwd = mkdtempSync(join(tmpdir(), 'gbrain-2397-cwd-'));
+    packagedCwd = mkdtempSync(join(tmpdir(), 'gbrain-2397-packaged-'));
     writeRules(repoA, ['wiki/from-config-repo/*', 'config-repo-only/*']);
     writeRules(repoB, ['wiki/from-default-source/*']);
+    writeRules(repoC, ['wiki/from-active-source/*']);
+    writeRules(packagedCwd, ['wiki/from-packaged-cwd/*']);
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
@@ -203,7 +210,7 @@ describe('#2397: allow-list resolution ladder (engine repo beats compiled-binary
 
   afterAll(async () => {
     await engine?.disconnect();
-    for (const dir of [repoA, repoB, foreignCwd]) {
+    for (const dir of [repoA, repoB, repoC, foreignCwd, packagedCwd]) {
       if (dir) rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -228,12 +235,35 @@ describe('#2397: allow-list resolution ladder (engine repo beats compiled-binary
     expect(globs).not.toContain('notes/from-default-source/*');
   });
 
-  test('cwd rung still wins over the engine rung (dev runs from the brain repo)', async () => {
-    // bun test runs from the gbrain repo root, so the cwd candidate exists
-    // and wins even though sync.repo_path points at repoA.
-    const globs = await loadAllowedSlugPrefixes('wiki', engine);
-    expect(globs).toContain('dream-cycle-summaries/*');
+  test('engine operator policy wins over an explicit packaged cwd fixture', async () => {
+    // Production runs from /app, where packaged rules exist, while the
+    // operator-owned brain policy lives under /brain. Set both sides inside
+    // this test so it independently fails under the old cwd-first ordering.
+    const previous = await engine.getConfig('sync.repo_path');
+    await engine.setConfig('sync.repo_path', repoA);
+    try {
+      const globs = await inCwd(packagedCwd, () => loadAllowedSlugPrefixes('wiki', engine));
+      expect(globs).toContain('wiki/from-config-repo/*');
+      expect(globs).toContain('config-repo-only/*');
+      expect(globs).not.toContain('wiki/from-packaged-cwd/*');
+    } finally {
+      if (previous === null) await engine.unsetConfig('sync.repo_path');
+      else await engine.setConfig('sync.repo_path', previous);
+    }
+  });
+
+  test('non-default source resolves only its active checkout policy', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path) VALUES ('team-a', 'Team A', $1)
+       ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+      [repoC],
+    );
+    await engine.setConfig('sync.repo_path', repoA);
+    const globs = await inCwd(packagedCwd, () =>
+      loadAllowedSlugPrefixes('wiki', engine, undefined, 'team-a'));
+    expect(globs).toContain('wiki/from-active-source/*');
     expect(globs).not.toContain('wiki/from-config-repo/*');
+    expect(globs).not.toContain('wiki/from-packaged-cwd/*');
   });
 
   test('a broken engine fails open to the next rung', async () => {

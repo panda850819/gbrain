@@ -12,9 +12,10 @@
  * Resolution ladder (first EXISTING file wins and is authoritative — an
  * absent file falls open to the next rung, but a present-yet-invalid file
  * keeps the legacy NO_ALLOWLIST hard failure instead of being shadowed):
- *   1. `<cwd>/skills/_brain-filing-rules.json` — dev runs from the repo.
- *   2. Engine-resolved brain repo — `sync.repo_path` config, else the
- *      default source's `local_path` (compiled worker with a foreign cwd).
+ *   1. Engine-resolved brain repo — `sync.repo_path` config, else the
+ *      default source's `local_path` (operator-owned production policy).
+ *   2. `<cwd>/skills/_brain-filing-rules.json` — dev fallback when no brain
+ *      repo is configured; packaged `/app` must not shadow `/brain`.
  *   3. `__dirname` source tree — bun-test / non-compiled runs.
  *   4. Statically-bundled JSON — ships inside the compiled binary, so the
  *      ladder never resolves to `[]` for a stock filing-rules file.
@@ -70,8 +71,21 @@ export function bundledDreamGlobs(outputRoot = 'wiki'): string[] {
  * null so the ladder falls through to the next rung instead of failing
  * the phase.
  */
-async function resolveBrainRepoPath(engine: BrainEngine): Promise<string | null> {
+async function resolveBrainRepoPath(
+  engine: BrainEngine,
+  sourceId = 'default',
+): Promise<string | null> {
   try {
+    // Non-default runs must never inherit the default brain's broader policy.
+    // Resolve only the active source checkout; a miss falls through to the
+    // packaged defaults, not sync.repo_path or sources.default.
+    if (sourceId !== 'default') {
+      const rows = await engine.executeRaw<{ local_path: string | null }>(
+        `SELECT local_path FROM sources WHERE id = $1`,
+        [sourceId],
+      );
+      return rows[0]?.local_path ?? null;
+    }
     const cfg = await engine.getConfig('sync.repo_path');
     if (cfg) return cfg;
     const rows = await engine.executeRaw<{ local_path: string | null }>(
@@ -116,12 +130,14 @@ export async function loadAllowedSlugPrefixes(
   outputRoot = 'wiki',
   engine?: BrainEngine,
   namespaces?: DreamNamespaceGlobs,
+  sourceId = 'default',
 ): Promise<string[]> {
-  const candidates = [join(process.cwd(), 'skills', '_brain-filing-rules.json')];
+  const candidates: string[] = [];
   if (engine) {
-    const repo = await resolveBrainRepoPath(engine);
+    const repo = await resolveBrainRepoPath(engine, sourceId);
     if (repo) candidates.push(join(repo, 'skills', '_brain-filing-rules.json'));
   }
+  candidates.push(join(process.cwd(), 'skills', '_brain-filing-rules.json'));
   candidates.push(join(__dirname, '..', '..', '..', 'skills', '_brain-filing-rules.json'));
   return appendNamespaceGlobs(loadFromCandidates(candidates, outputRoot), namespaces);
 }
