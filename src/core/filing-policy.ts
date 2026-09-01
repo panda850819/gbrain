@@ -269,6 +269,11 @@ function normalizeDirectory(value: unknown, field: string): string {
   if (value.startsWith('/') || value.includes('\\')) {
     throw new MalformedSourceFilingPolicyError(`${field} must be a relative path`);
   }
+  // A source policy may intentionally declare the root raw-data namespace,
+  // but filingPolicyRejectionReason rejects every slug under it as raw_path.
+  // Keep this exception literal so other hidden directories stay malformed.
+  if (value === '.raw/') return value;
+
   const withoutTrailingSlash = value.endsWith('/') ? value.slice(0, -1) : value;
   if (withoutTrailingSlash.length === 0 || withoutTrailingSlash.endsWith('/')) {
     throw new MalformedSourceFilingPolicyError(`${field} has an empty path segment`);
