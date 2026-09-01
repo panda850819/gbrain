@@ -93,6 +93,38 @@ describe.skipIf(skip)('PostgresEngine forward-reference bootstrap (E2E)', () => 
     expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
   });
 
+  test('pre-v145 facts.kind constraint admits idea after REAL Postgres migration', async () => {
+    await engine.initSchema();
+    const conn = (engine as any).sql;
+    await conn.unsafe(`
+      DELETE FROM facts WHERE kind = 'idea';
+      ALTER TABLE facts DROP CONSTRAINT IF EXISTS facts_kind_check;
+      ALTER TABLE facts ADD CONSTRAINT facts_kind_check
+        CHECK (kind IN ('event','preference','commitment','belief','fact'));
+    `);
+    await engine.setConfig('version', '144');
+    const narrow = await conn.unsafe(`
+      SELECT pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint
+       WHERE conname = 'facts_kind_check' AND conrelid = 'facts'::regclass
+    `);
+    expect(narrow).toHaveLength(1);
+    expect(narrow[0]!.definition).not.toContain('idea');
+
+    await engine.initSchema();
+    expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
+    await conn.unsafe(
+      `INSERT INTO facts (fact, kind, source) VALUES ('postgres idea', 'idea', 'test:v145')`,
+    );
+    const constraints = await conn.unsafe(`
+      SELECT pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint
+       WHERE conname = 'facts_kind_check' AND conrelid = 'facts'::regclass
+    `);
+    expect(constraints).toHaveLength(1);
+    expect(constraints[0]!.definition).toContain('idea');
+  }, 90_000);
+
   test('pre-v121 timeline shape converges to full final shape on REAL Postgres (#2626 wedge class)', async () => {
     // The v121 wedge was Postgres-visible in production (blob CREATE INDEX
     // on a column migration v121 hadn't added yet); the PGLite twins live in
