@@ -2,6 +2,75 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.47.8.0] - 2026-09-01
+
+**Your agent can now keep each source's pages in the folders that source
+actually declares.**
+
+Remote page writes used to accept a valid-looking slug even when it belonged
+in the wrong top-level folder. That left filing cleanup to a later repository
+maintenance pass. This release moves the decision to the write boundary, so a
+source can describe its own filing vocabulary and the agent gets an immediate,
+recoverable answer before a page is imported or written through to disk.
+
+A source policy may allow folders such as `people/`, `companies/`, or a
+source-specific directory. `topics/` can also name the immediate topic
+folders that are valid. Bare-root pages, `wiki/`, undeclared folders, and raw
+sidecar paths are refused with an `inbox/` recovery hint. A source checkout
+without a policy, including a legacy checkout without a `skills/` directory,
+keeps its previous remote behavior. A missing checkout, unreadable policy, or
+malformed policy refuses the remote write instead of guessing.
+
+### How to use it
+
+Put `_brain-filing-rules.json` in the target source checkout at
+`skills/_brain-filing-rules.json`, then let the agent write normally. The
+policy is selected from the source being written, not from the installed
+GBrain bundle.
+
+**Say to your agent:** *"make remote page writes follow this source's filing rules"*
+
+### What you'd see in a concrete example
+
+| Requested page | Source declaration | Result |
+| --- | --- | --- |
+| `people/alice-example` | `people/` | Accepted |
+| `topics/markets/rates` | `topics/` plus `markets` | Accepted |
+| `notes/random` | no `notes/` rule | Rejected with an `inbox/` hint |
+
+### Things to watch
+
+This changes ordinary untrusted remote `put_page` calls only. Trusted local
+CLI writes keep their existing behavior, and protected subagent and OAuth
+caller fences still run first. There is no schema migration or backfill. Run
+`gbrain upgrade` and check the source policy when you want to opt a source in.
+
+## To take advantage of v0.47.8.0
+
+`gbrain upgrade` is all you need. There is no schema migration and no manual
+backfill. If a source should enforce filing, make sure its checkout contains
+`skills/_brain-filing-rules.json`, then verify the result:
+
+```bash
+gbrain --version
+gbrain doctor
+```
+
+### Itemized changes
+
+- Added `src/core/filing-policy.ts` to load and validate a source-owned policy,
+  normalize directory declarations, enforce topic-domain boundaries, and
+  return stable `invalid_params` recovery errors.
+- Wired the gate into `put_page` after the existing subagent and OAuth fences,
+  before dry-run, import, and write-through. Dedup-resolved paths receive the
+  same source-policy check.
+- Added focused source-scoped tests for allow and reject paths, legacy
+  checkouts, malformed and unavailable policy state, dedup resolution, and
+  fence ordering. Updated engine-free namespace and OAuth test fixtures for
+  the pre-dry-run source lookup.
+- Recorded the new module in `docs/architecture/KEY_FILES.md` and refreshed
+  all bundled filing-rule mirrors and their integrity manifest.
+
 ## [0.47.7.0] - 2026-08-30
 
 **The test-infra speed wave: the local suite runs up to 3× faster on

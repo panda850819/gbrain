@@ -21,6 +21,7 @@ import { stripTakesFence } from '../takes-fence.ts';
 import type { WriterLintPayload } from '../output/post-write.ts';
 import { stripFactsFence } from '../facts-fence.ts';
 import { getContentFlag } from '../quarantine.ts';
+import { enforceRemoteFilingPolicy } from '../filing-policy.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
 import { resolveExcludePrivatePages, isPrivatePage, findPrivateOnlySlugs } from '../search/private-visibility.ts';
 import { LIST_PAGES_DESCRIPTION, CAPTURE_DESCRIPTION } from '../operations-descriptions.ts';
@@ -378,6 +379,11 @@ const put_page: Operation = {
     // enforceSubagentSlugFence for the fail-closed policy.
     enforceSubagentSlugFence(ctx, slug, 'put_page');
     enforceClientSlugFence(ctx, slug, 'put_page');
+    // Source-owned filing policy (issue #28). This is deliberately after
+    // the existing caller fences and before dry-run/import/write-through, so
+    // a remote caller gets the same decision without any persistence side
+    // effect while local CLI behavior remains unchanged.
+    await enforceRemoteFilingPolicy(ctx, slug);
 
     if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
 
@@ -480,6 +486,10 @@ const put_page: Operation = {
           'Remove the `id:` frontmatter field (or change the content) to write a new page under your own prefix.',
         );
       }
+      // importFromContent may redirect an allowed requested slug to an
+      // existing page via content_hash/frontmatter.id. The disk sink uses the
+      // resolved slug, so the source filing policy must cover that slug too.
+      await enforceRemoteFilingPolicy(ctx, result.slug);
     }
 
     // v0.39 T13 — auto-prompt on first unknown-type write.

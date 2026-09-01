@@ -29,7 +29,12 @@ function op(name: string): Operation {
 }
 
 function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
-  const engine = {} as BrainEngine; // dry_run short-circuits before touching the engine
+  const engine = {
+    // put_page now resolves the source-owned filing policy before dry-run;
+    // provide a pathless legacy source so these OAuth fence tests keep their
+    // deliberately engine-free setup.
+    executeRaw: async <T>(_sql: string, _params?: unknown[]) => [{ local_path: null }] as T[],
+  } as unknown as BrainEngine;
   return {
     engine,
     config: { engine: 'postgres' } as any,
