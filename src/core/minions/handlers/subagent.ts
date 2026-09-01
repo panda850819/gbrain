@@ -1223,7 +1223,9 @@ async function verifyRuntimeWrites(
   }
   const missing: string[] = [];
   for (const slug of new Set(writes)) {
-    const page = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
+    // An omitted source_id means the default source, never "any source".
+    // Otherwise a same-slug page in another source can forge read-back proof.
+    const page = await engine.getPage(slug, { sourceId: sourceId ?? 'default' });
     if (!page) missing.push(slug);
   }
   if (missing.length > 0) {

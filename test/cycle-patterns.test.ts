@@ -109,6 +109,7 @@ describe('patterns scope filter', () => {
     // `meetings/` tree) can point the phase at their own compiled_truth
     // source instead.
     expect(patternsSrc).toContain('slug LIKE $2');
+    expect(patternsSrc).toContain('source_id = $3');
     expect(patternsSrc).toContain('${sourceSlugPrefix}/%');
     expect(patternsSrc).toContain('dream.patterns.source_slug_prefix');
   });
@@ -130,12 +131,11 @@ describe('patterns scope filter', () => {
     expect(patternsSrc).toContain('${outputRoot}/personal/reflections');
   });
 
-  test('adds a configured output_slug_prefix to the subagent write allow-list', () => {
-    // A custom dream.patterns.output_slug_prefix (e.g. a flat schema with no
-    // personal/ nesting) is not covered by the filing-rules globs, which only
-    // remap the `wiki/personal/patterns/*` literal by output_root. The phase
-    // must add it explicitly so put_page actually grants write access there.
-    expect(patternsSrc).toContain('outputGlob');
-    expect(patternsSrc).toContain('allowedSlugPrefixes.push(outputGlob)');
+  test('DB output_slug_prefix cannot mint subagent write authority', () => {
+    // Operator-owned filing rules are the authority boundary. DB config may
+    // select an approved prefix, but the phase must reject an unapproved one
+    // rather than append a new allow-list glob.
+    expect(patternsSrc).toContain('WRITE_TARGET_OUTSIDE_ALLOWLIST');
+    expect(patternsSrc).not.toContain('allowedSlugPrefixes.push(outputGlob)');
   });
 });

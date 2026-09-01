@@ -194,6 +194,42 @@ describe('runtime-mode subagent execution', () => {
     expect(runtime.requests[0]!.operation).toBe('subagent');
   });
 
+  test('default-source receipt cannot be forged by a same-slug page in another source', async () => {
+    const slug = 'reflections/dreams/foreign-source-only';
+    const runtime = new WholeSubagentRuntime([slug]);
+    configureGateway({
+      chat_model: 'external:opaque',
+      env: {},
+      runtime: { command: process.execPath, capabilities: ['subagent'] },
+    });
+    __setRuntimeAdapterForTests(runtime);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('runtime-foreign', 'Runtime Foreign')
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await engine.putPage(slug, {
+      type: 'note',
+      title: 'Foreign runtime result',
+      compiled_truth: 'This page exists only outside the default source.',
+      timeline: '',
+      frontmatter: {},
+    }, { sourceId: 'runtime-foreign' });
+    const handler = makeSubagentHandler({
+      engine,
+      toolRegistry: [],
+      makeAnthropic: () => { throw new Error('Anthropic must not be constructed'); },
+    });
+    const job = await queue.add('subagent', {
+      prompt: 'reject cross-source read-back',
+      model: 'external:opaque',
+      allowed_slug_prefixes: ['reflections/dreams/*'],
+    }, {}, { allowProtectedSubmit: true });
+
+    await expect(
+      handler(makeContext({ id: job.id, name: job.name, data: job.data as Record<string, unknown> })),
+    ).rejects.toThrow('not readable after completion');
+  });
+
   test('fails closed when runtime write receipt cannot be read back', async () => {
     const runtime = new WholeSubagentRuntime(['reflections/dreams/missing-runtime-result']);
     configureGateway({
