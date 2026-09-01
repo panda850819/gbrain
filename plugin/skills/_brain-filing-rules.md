@@ -12,6 +12,24 @@ not the source, not the skill that's running.
 3. Cross-link from related directories
 4. When in doubt: what would you search for to find this page again?
 
+## Remote put_page boundary (#28)
+
+When this rules file is installed under a source checkout, the remote
+`put_page` operation reads the source-owned
+`<local_path>/skills/_brain-filing-rules.json` policy. A policy-bearing source
+accepts only slugs below its declared `rules[].directory` prefixes. Bare-root
+slugs, the `wiki/` namespace, undeclared namespaces, and `.raw/` sidecar paths are rejected before
+any dry-run, import, or write-through. A `topics/<domain>/...` slug also needs
+an immediate domain listed in `topic_domains.allowed`.
+
+A missing JSON policy preserves legacy remote behavior when the source checkout
+is readable, including legacy checkouts without a `skills/` directory. A
+missing/unreadable checkout, or a malformed/unreadable policy, fails closed and
+disables ordinary remote page writes until the source owner repairs it. Rejections are `invalid_params` with
+an `inbox/` recovery hint. Trusted local CLI writes keep their existing
+behavior; OAuth fences still run before this filing gate, while protected
+subagent writes remain governed by their stricter subagent namespace fence.
+
 ## Common Misfiling Patterns -- DO NOT DO THESE
 
 | Wrong | Right | Why |

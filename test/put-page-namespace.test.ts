@@ -9,7 +9,10 @@
  *    prefix-collision defeated, and fail-closed when subagentId is missing.
  */
 
-import { describe, test, expect } from 'bun:test';
+import { afterAll, describe, test, expect } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { operations, OperationError } from '../src/core/operations.ts';
 import type { OperationContext, Operation } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -17,8 +20,18 @@ import type { BrainEngine } from '../src/core/engine.ts';
 const put_page = operations.find(o => o.name === 'put_page') as Operation;
 if (!put_page) throw new Error('put_page op missing');
 
+// The filing-policy gate runs before dry-run. Give these namespace-only tests
+// a readable source checkout with no policy so they continue to exercise the
+// legacy non-subagent contract without relying on an incomplete engine double.
+const legacySourceRoot = mkdtempSync(join(tmpdir(), 'gbrain-put-page-namespace-'));
+mkdirSync(join(legacySourceRoot, 'skills'));
+const legacyEngine = {
+  executeRaw: async () => [{ local_path: legacySourceRoot }],
+} as unknown as BrainEngine;
+afterAll(() => rmSync(legacySourceRoot, { recursive: true, force: true }));
+
 function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
-  const engine = {} as BrainEngine; // dry_run short-circuits before touching the engine
+  const engine = legacyEngine;
   return {
     engine,
     config: { engine: 'postgres' } as any,
