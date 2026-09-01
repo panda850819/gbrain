@@ -16,6 +16,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { operations, OperationError } from '../src/core/operations.ts';
+import { filingPolicyRejectionReason, parseSourceFilingPolicy } from '../src/core/filing-policy.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { resetGateway } from '../src/core/ai/gateway.ts';
 import {
@@ -104,6 +105,30 @@ async function expectPolicyError(
 }
 
 describe('put_page source-owned filing policy', () => {
+  test('accepts the production root .raw/ rule without allowing raw paths', async () => {
+    const policy = parseSourceFilingPolicy(policyFor(['.raw/', 'people/']));
+    expect(policy.directories).toContain('.raw/');
+
+    for (const slug of ['.raw/', '.raw/page', '.raw/nested/page', '.RAW/page']) {
+      expect(filingPolicyRejectionReason(slug, policy)).toBe('raw_path');
+    }
+
+    const source = await registerSource(['.raw/', 'people/']);
+    const allowed = await putPage.handler(makeCtx({ sourceId: source.id }), {
+      slug: 'people/alice-example',
+      content: PAGE_CONTENT,
+    });
+    expect(allowed).toMatchObject({ status: 'created_or_updated' });
+  });
+
+  test('rejects non-literal hidden directory declarations as malformed', () => {
+    for (const directory of ['.secret/', '.raw', '.RAW/']) {
+      expect(() => parseSourceFilingPolicy(policyFor([directory]))).toThrow(
+        'rules[0].directory has an invalid path segment',
+      );
+    }
+  });
+
   test('allows only declared source directories and rejects bare/undeclared paths', async () => {
     const source = await registerSource(['people/', 'custom/']);
     const ctx = makeCtx({ sourceId: source.id });
