@@ -14,9 +14,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { operations, OperationError } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { resetGateway } from '../src/core/ai/gateway.ts';
+import {
+  __resetGuardrailProvidersForTests,
+  registerGuardrailProvider,
+} from '../src/core/guardrails.ts';
 
 const putPage = operations.find((operation) => operation.name === 'put_page')!;
 const PAGE_CONTENT = '---\ntitle: Filing test\ntype: note\n---\n\nBody.';
@@ -41,6 +46,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await resetPgliteState(engine);
   resetGateway();
+  __resetGuardrailProvidersForTests();
 });
 
 function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
@@ -269,23 +275,66 @@ describe('put_page source-owned filing policy', () => {
     expect(legacy).toMatchObject({ status: 'created_or_updated' });
   });
 
-  test('dedup redirects are checked against the resolved filing path', async () => {
+  test('dedup redirects are rejected before importer guardrail and audit side effects', async () => {
     const source = await registerSource(['people/']);
-    const victimContent = '---\ntitle: Legacy victim\ntype: note\nid: legacy-victim\n---\n\nBody.';
-    await putPage.handler(makeCtx({ sourceId: source.id, remote: false }), {
-      slug: 'legacy/victim',
-      content: victimContent,
-    });
+    const auditDir = path.join(tempRoot, `${source.id}-audit`);
+    await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, async () => {
+      try {
+        // The Cloudflare title makes importFromContent emit a content-sanity
+        // audit row if the rejected request reaches the importer.
+        const victimContent = '---\ntitle: Just a moment...\ntype: note\nid: legacy-victim\n---\n\nBody.';
+        await putPage.handler(makeCtx({ sourceId: source.id, remote: false }), {
+          slug: 'legacy/victim',
+          content: victimContent,
+        });
+        fs.rmSync(auditDir, { recursive: true, force: true });
 
-    const error = await expectPolicyError(
-      makeCtx({ sourceId: source.id }),
-      'people/new-victim',
-      victimContent,
-    );
-    expect(error.code).toBe('invalid_params');
-    expect(error.suggestion).toContain('inbox/');
-    expect(await engine.getPage('legacy/victim', { sourceId: source.id })).not.toBeNull();
-    expect(await engine.getPage('people/new-victim', { sourceId: source.id })).toBeNull();
+        let guardrailCalls = 0;
+        registerGuardrailProvider({
+          id: 'dedup-preflight-observer',
+          classify: () => { guardrailCalls++; },
+        });
+
+        const error = await expectPolicyError(
+          makeCtx({ sourceId: source.id }),
+          'people/new-victim',
+          victimContent,
+        );
+        expect(error.code).toBe('invalid_params');
+        expect(error.suggestion).toContain('inbox/');
+        expect(guardrailCalls).toBe(0);
+        expect(fs.existsSync(auditDir)).toBe(false);
+        expect(await engine.getPage('legacy/victim', { sourceId: source.id })).not.toBeNull();
+        expect(await engine.getPage('people/new-victim', { sourceId: source.id })).toBeNull();
+      } finally {
+        __resetGuardrailProvidersForTests();
+      }
+    });
+  });
+
+  test('dedup fencing preserves the importer existing-slug fast path', async () => {
+    const source = await registerSource(['people/']);
+    const sharedId = 'duplicate-id-with-requested-page';
+    const page = {
+      type: 'note' as const,
+      title: 'Requested page',
+      compiled_truth: 'Current body.',
+      timeline: '',
+      frontmatter: { id: sharedId },
+      tags: [],
+    };
+    // Seed an older out-of-policy duplicate, then the requested canonical row.
+    // Importer hash precedence must retain the requested slug rather than
+    // treating the oldest matching ID as a redirect.
+    await engine.putPage('legacy/older', page, { sourceId: source.id });
+    await engine.putPage('people/requested', page, { sourceId: source.id });
+
+    const result = await putPage.handler(makeCtx({ sourceId: source.id }), {
+      slug: 'people/requested',
+      content: `---\ntitle: Requested page\ntype: note\nid: ${sharedId}\n---\n\nCurrent body.`,
+    });
+    expect(result).toMatchObject({ status: 'skipped', slug: 'people/requested' });
+    expect(await engine.getPage('people/requested', { sourceId: source.id })).not.toBeNull();
   });
 
   test('protected subagent fences keep their existing namespace contract', async () => {

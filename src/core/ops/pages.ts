@@ -464,6 +464,17 @@ const put_page: Operation = {
       // (including frontmatter-only content the raw-content check above
       // can't see — the parsed body is blank even though content isn't).
       ...(p.allow_empty === true ? { allowEmptyOverwrite: true } : {}),
+      beforeDuplicateRedirect: async (resolvedSlug) => {
+        if (slugOutsideCallerFence(ctx, resolvedSlug)) {
+          ctx.logger.warn(`[put_page] dedup resolved '${slug}' to an out-of-fence page; refusing (client ${ctx.auth?.clientId ?? 'unknown'}, subagent ${ctx.subagentId ?? 'none'})`);
+          throw new OperationError(
+            'permission_denied',
+            'put_page: this content already exists on a page outside your write scope, so the write would have modified that page instead.',
+            'Remove the `id:` frontmatter field (or change the content) to write a new page under your own prefix.',
+          );
+        }
+        await enforceRemoteFilingPolicy(ctx, resolvedSlug);
+      },
     });
 
     // The dedup pre-check in importFromContent can resolve the write to a
