@@ -32,7 +32,7 @@ export const PROJECT = {
   repoUrl: "https://github.com/garrytan/gbrain",
   rawBaseUrl:
     process.env.LLMS_REPO_BASE ??
-    "https://raw.githubusercontent.com/garrytan/gbrain/master",
+    "https://raw.githubusercontent.com/panda850819/gbrain/panda/main",
 };
 
 export const SECTIONS: DocSection[] = [
