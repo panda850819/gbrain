@@ -175,7 +175,12 @@ export async function runPhasePatterns(
     }
 
     // Gather reflections within the already-approved lookback namespace.
-    const reflections = await gatherReflections(engine, config.lookbackDays, config.sourceSlugPrefix);
+    const reflections = await gatherReflections(
+      engine,
+      config.lookbackDays,
+      config.sourceSlugPrefix,
+      opts.sourceId ?? 'default',
+    );
     if (reflections.length < config.minEvidence) {
       return skipped(
         'insufficient_evidence',
@@ -508,6 +513,7 @@ async function gatherReflections(
   engine: BrainEngine,
   lookbackDays: number,
   sourceSlugPrefix = 'wiki/personal/reflections',
+  sourceId = 'default',
 ): Promise<ReflectionRef[]> {
   const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
   // Reflections live under the configured source slug prefix (bound as a
@@ -516,10 +522,11 @@ async function gatherReflections(
     `SELECT slug, title, compiled_truth
        FROM pages
       WHERE slug LIKE $2
+        AND source_id = $3
         AND updated_at >= $1::timestamptz
       ORDER BY updated_at DESC
       LIMIT 100`,
-    [since, `${sourceSlugPrefix}/%`],
+    [since, `${sourceSlugPrefix}/%`, sourceId],
   );
   return rows.map(r => ({
     slug: r.slug,

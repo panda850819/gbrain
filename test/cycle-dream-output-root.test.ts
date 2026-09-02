@@ -150,6 +150,32 @@ describe('#2415: loadOutputRoot validation + patterns gather scope', () => {
     expect(result.details?.reflections_considered).toBe(3);
   });
 
+  test('patterns gathers reflections only from the active source', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('patterns-a', 'Patterns A'), ('patterns-b', 'Patterns B')
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    for (const sourceId of ['patterns-a', 'patterns-b']) {
+      const count = sourceId === 'patterns-a' ? 3 : 2;
+      for (let i = 0; i < count; i++) {
+        await engine.putPage(`notes/personal/reflections/source-isolation-${i}`, {
+          type: 'note',
+          title: `${sourceId}-${i}`,
+          compiled_truth: `reflection from ${sourceId}`,
+          timeline: '',
+          frontmatter: {},
+        }, { sourceId });
+      }
+    }
+    const result = await runPhasePatterns(engine, {
+      brainDir: '/tmp',
+      dryRun: true,
+      sourceId: 'patterns-a',
+    });
+    expect(result.status).toBe('ok');
+    expect(result.details?.reflections_considered).toBe(3);
+  });
+
   test('patterns rejects an unapproved DB target before it reaches SQL', async () => {
     await engine.setConfig('dream.write_targets.reflections', 'reflections/dreams');
     try {
