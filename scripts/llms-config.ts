@@ -32,7 +32,7 @@ export const PROJECT = {
   repoUrl: "https://github.com/garrytan/gbrain",
   rawBaseUrl:
     process.env.LLMS_REPO_BASE ??
-    "https://raw.githubusercontent.com/garrytan/gbrain/master",
+    "https://raw.githubusercontent.com/panda850819/gbrain/panda/main",
 };
 
 export const SECTIONS: DocSection[] = [
@@ -56,9 +56,6 @@ export const SECTIONS: DocSection[] = [
         description:
           "Per-file index for the gbrain repo: what each src/ file does + its load-bearing invariants. The on-demand detail CLAUDE.md's reference map routes to.",
         path: "docs/architecture/KEY_FILES.md",
-        // Link-only until compressed to current-state (still large pre-compression).
-        // Flip to inlined once the doc-history compression lands and the bundle
-        // budget is re-measured.
         includeInFull: false,
       },
       {
@@ -98,15 +95,9 @@ export const SECTIONS: DocSection[] = [
         description:
           "MECE directory structure (people/, companies/, concepts/).",
         path: "docs/GBRAIN_RECOMMENDED_SCHEMA.md",
-        // v0.40.6.0: 64KB reference doc. Web index entry stays; the single-fetch
-        // bundle gets the README + setup guides instead. Keeps llms-full.txt
-        // under the 600KB budget as CLAUDE.md grows with each release.
         includeInFull: false,
       },
       {
-        // Re-inlined: the CLAUDE.md resolver restructure (per-file index moved to
-        // docs/architecture/KEY_FILES.md, link-only) freed ~530KB of bundle
-        // headroom, so this value-explainer rides the single-fetch bundle again.
         title: "docs/what-schemas-unlock.md",
         description:
           "Why schemas matter: 7 killer use cases (4000 invisible meetings, founder ops brain, research brain, legal brain, team brain, agent-as-co-curator) + the structural argument for typed page kinds. Read this before pitching schema authoring (v0.40.7.0).",
@@ -133,11 +124,6 @@ export const SECTIONS: DocSection[] = [
         description:
           "Deploying the gbrain jobs worker: crontab + watchdog, inline --follow, systemd/Procfile/fly.toml, upgrade checklist.",
         path: "docs/guides/minions-deployment.md",
-        // v0.41.8.0: 13KB deployment runbook. Web index entry stays;
-        // single-fetch bundle drops it to keep under FULL_SIZE_BUDGET
-        // (CLAUDE.md grew past 600KB once master's v0.41.2-v0.41.6 +
-        // this wave's annotations landed). Operators read this once;
-        // agents rarely need it in context.
         includeInFull: false,
       },
       {
@@ -184,8 +170,6 @@ export const SECTIONS: DocSection[] = [
         description:
           "ZeroEntropy (deprecated; hosted sunset 2026-09-04): the off-ramp for existing brains — migrate embeddings + reranker, self-host continuity, troubleshooting. Do not onboard.",
         path: "docs/ai-providers/zeroentropy.md",
-        // Setup walkthrough — discoverable in the index, not inlined in the
-        // single-fetch bundle (keeps llms-full.txt under FULL_SIZE_BUDGET).
         includeInFull: false,
       },
       {
@@ -226,11 +210,6 @@ export const SECTIONS: DocSection[] = [
         description:
           "Patches for downstream agent skill forks. One section per release.",
         path: "docs/UPGRADING_DOWNSTREAM_AGENTS.md",
-        // Excluded from inlined bundle (v0.41.7.0): 25KB of release-by-release
-        // migration patches that are valuable as a reference but don't need
-        // to ride along in every llms-full.txt fetch. Pushes the bundle back
-        // under FULL_SIZE_BUDGET after the v0.41.7.0 scaling-skills guide
-        // landed.
         includeInFull: false,
       },
       {
@@ -313,13 +292,4 @@ export const INLINE_TIPS = [
   "`gbrain upgrade` runs post-upgrade + apply-migrations.",
 ];
 
-// Target ~800KB so llms-full.txt fits in ~200k-token contexts with room to spare.
-// Bumped 600KB→700KB in v0.41.9.0, then 700KB→750KB once CLAUDE.md crossed 700KB,
-// then 750KB→800KB in v0.42.10.0 when the #972 global-basename Key Files annotation
-// (landing alongside master's #1696/#1699 waves) crossed the 750KB line. CLAUDE.md
-// is ~540KB+ (the bulk of the bundle) and grows ~5-15KB per release with each
-// feature's Key Files annotation. CLAUDE.md is the whole point of the one-fetch
-// bundle, so it stays inlined; the budget tracks its legitimate growth. Still fits
-// comfortably in 200k+ context models.
-// Generator prints a WARN if exceeded; ship with includeInFull=false exclusions.
 export const FULL_SIZE_BUDGET = 800_000;
