@@ -7,7 +7,7 @@
  */
 
 import type { BrainEngine, StaleTakeRow, TakeEmbeddingInput } from './engine.ts';
-import { embedBatchWithBackoff } from '../commands/embed.ts';
+import { embedBatchWithBackoff, withEmbeddingRetryPolicy } from './embed-retry.ts';
 
 const DEFAULT_BATCH_SIZE = 100;
 
@@ -49,7 +49,7 @@ export async function embedStaleTakes(
 
   const batchSize = Math.min(500, Math.max(1, Math.floor(opts.batchSize ?? DEFAULT_BATCH_SIZE)));
   const embedFn = opts.embedFn ?? ((texts: string[], embedOpts: { abortSignal?: AbortSignal }) =>
-    embedBatchWithBackoff(texts, embedOpts));
+    embedBatchWithBackoff(texts, withEmbeddingRetryPolicy({ abortSignal: embedOpts.abortSignal })));
 
   for (let start = 0; start < stale.length; start += batchSize) {
     if (opts.signal?.aborted) break;

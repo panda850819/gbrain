@@ -10,7 +10,8 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { createHash, randomBytes } from 'node:crypto';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { embedStalePages } from '../src/core/embed-stale.ts';
+import { embedStaleForSource, embedStalePages } from '../src/core/embed-stale.ts';
+import { _setRateLimitFloorsForTests } from '../src/core/embed-retry.ts';
 import { embedBatchForImport, classifyEmbeddingFailure } from '../src/core/embedding-failure.ts';
 import { startHttpTransport } from '../src/mcp/http-transport.ts';
 import {
@@ -193,6 +194,42 @@ describe('#40 — remote MCP put_page survives embedding-provider failure', () =
     }
     expect(attempts).toBe(1);
     expect(elapsedMs).toBeLessThan(5_000);
+  });
+
+  test('stale backfill does not retry a quota failure reported as HTTP 429', async () => {
+    const slug = `sessions/debug/stale-quota-${randomBytes(6).toString('hex')}`;
+    await engine.putPage(slug, {
+      type: 'note',
+      title: 'Stale quota probe',
+      compiled_truth: 'A stale chunk must remain recoverable after quota failure.',
+    });
+    await engine.upsertChunks(slug, [{
+      chunk_index: 0,
+      chunk_text: 'stale quota chunk',
+      chunk_source: 'compiled_truth',
+      token_count: 4,
+    }]);
+
+    let attempts = 0;
+    __setEmbedTransportForTests(async () => {
+      attempts += 1;
+      const error = new Error('429 no credits remaining; try again in 0ms');
+      Object.assign(error, { cause: { status: 429 } });
+      throw error;
+    });
+    _setRateLimitFloorsForTests([1, 1, 1, 1, 1]);
+    try {
+      const result = await embedStaleForSource(engine, 'default', {
+        batchSize: 1,
+        concurrency: 1,
+      });
+      expect(result.done).toBe(true);
+      expect(result.embedded).toBe(0);
+      expect(attempts).toBe(1);
+      expect(await engine.countStaleChunks({ sourceId: 'default' })).toBeGreaterThanOrEqual(1);
+    } finally {
+      _setRateLimitFloorsForTests(null);
+    }
   });
 
   test('classifies provider failures into the bounded, sanitized contract', () => {

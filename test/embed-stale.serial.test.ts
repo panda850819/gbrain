@@ -79,6 +79,63 @@ describe('embedStaleForSource', () => {
     });
   });
 
+  test('soft-deleted pages are excluded from stale count and listing', async () => {
+    await seedPageWithStaleChunks('live', 2);
+    await seedPageWithStaleChunks('deleted', 3);
+    expect(await engine.softDeletePage('deleted')).toEqual({ slug: 'deleted' });
+
+    expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(2);
+    const rows = await engine.listStaleChunks({ sourceId: 'default', batchSize: 100 });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.slug === 'live')).toBe(true);
+  });
+
+  test('getHealth embedding aggregates match the live stale scan', async () => {
+    await seedPageWithStaleChunks('live', 2);
+    await seedPageWithStaleChunks('deleted', 3);
+    await engine.softDeletePage('deleted');
+
+    const stale = await engine.countStaleChunks({ sourceId: 'default' });
+    const health = await engine.getHealth({ sourceId: 'default' });
+    expect(stale).toBe(2);
+    expect(health.embed_coverage).toBe(0);
+    expect(health.missing_embeddings).toBe(stale);
+  });
+
+  test('deleted-only chunks are vacuous healthy coverage', async () => {
+    await seedPageWithStaleChunks('deleted', 3);
+    await engine.softDeletePage('deleted');
+
+    const health = await engine.getHealth({ sourceId: 'default' });
+    expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(0);
+    expect(health.embed_coverage).toBe(1);
+    expect(health.missing_embeddings).toBe(0);
+  });
+
+  test('backfill clears health aggregates without processing deleted chunks', async () => {
+    await seedPageWithStaleChunks('live', 2);
+    await seedPageWithStaleChunks('deleted', 3);
+    await engine.softDeletePage('deleted');
+
+    const before = await engine.getHealth({ sourceId: 'default' });
+    expect(before.embed_coverage).toBe(0);
+    expect(before.missing_embeddings).toBe(2);
+
+    const result = await embedStaleForSource(engine, 'default', { embedFn: fakeEmbedFn });
+    expect(result.embedded).toBe(2);
+
+    const after = await engine.getHealth({ sourceId: 'default' });
+    expect(after.embed_coverage).toBe(1);
+    expect(after.missing_embeddings).toBe(0);
+    expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(0);
+    const deletedStale = await engine.executeRaw<{ n: number }>(
+      `SELECT count(*)::int AS n FROM content_chunks cc
+         JOIN pages p ON p.id = cc.page_id
+        WHERE p.slug = 'deleted' AND cc.embedding IS NULL`,
+    );
+    expect(deletedStale[0]!.n).toBe(3);
+  });
+
   test('embeds every stale chunk across multiple pages in one call', async () => {
     await seedPageWithStaleChunks('a', 5);
     await seedPageWithStaleChunks('b', 3);

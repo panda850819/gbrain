@@ -7,11 +7,12 @@
  * the link/timeline coverage denominators and in most_connected, and
  * brain_score therefore never moved when a user soft-deleted pages.
  *
- * Boundary (deliberate): chunk- and link-scoped counts (embed_coverage,
- * missing_embeddings, link_count, dead_links) stay RAW — they occupy storage
- * until the autopilot purge phase, matching getStats. Destructive-removal
- * counts (purge paths, #2235) also deliberately count all rows and are
- * untouched here.
+ * Boundary (deliberate): embedding health aggregates (embed_coverage,
+ * missing_embeddings) follow stale-scan visibility and exclude soft-deleted
+ * pages, while link-scoped counts (link_count, dead_links) stay RAW — links
+ * occupy storage until the autopilot purge phase, matching getStats.
+ * Destructive-removal counts (purge paths, #2235) also deliberately count
+ * all rows and are untouched here.
  *
  * Runs against PGLite — the fixed SQL shapes are identical in both engines.
  */
@@ -145,7 +146,7 @@ describe('#1305 — getHealth excludes soft-deleted pages', () => {
     expect(h.link_coverage).toBeCloseTo(0.8, 5);
   });
 
-  test('chunk storage counts stay raw (the deliberate boundary)', async () => {
+  test('embedding health aggregates exclude soft-deleted chunks', async () => {
     await seedNote('wiki/kept');
     await seedNote('wiki/gone');
     for (const slug of ['wiki/kept', 'wiki/gone']) {
@@ -157,8 +158,8 @@ describe('#1305 — getHealth excludes soft-deleted pages', () => {
     await engine.softDeletePage('wiki/gone');
 
     const h = await engine.getHealth();
-    // Soft-deleted pages' chunks still occupy storage until purge; the
-    // missing_embeddings count keeps seeing them, same as getStats.
-    expect(h.missing_embeddings).toBe(2);
+    // Soft-deleted pages' chunks still occupy storage until purge, but health
+    // follows the stale scan and excludes them from missing_embeddings.
+    expect(h.missing_embeddings).toBe(1);
   });
 });
