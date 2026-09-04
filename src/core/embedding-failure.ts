@@ -9,7 +9,7 @@ export type EmbeddingDegradation = {
   attempted_chunks: number;
 };
 
-function failureReason(error: unknown): EmbeddingDegradation['reason'] {
+export function classifyEmbeddingFailure(error: unknown): EmbeddingDegradation['reason'] {
   const message = error instanceof Error ? error.message : String(error);
   if (/credit|quota|billing|payment required/i.test(message)) return 'quota_exhausted';
   if (/429|rate.?limit|too many requests/i.test(message)) return 'rate_limited';
@@ -25,7 +25,7 @@ export async function embedBatchForImport(
     if (vectors.length !== texts.length) throw new Error('Embedding vector count mismatch.');
     return { vectors };
   } catch (error: unknown) {
-    const reason = failureReason(error);
+    const reason = classifyEmbeddingFailure(error);
     return {
       degradation: {
         status: 'degraded',
