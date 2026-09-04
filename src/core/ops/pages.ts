@@ -477,6 +477,10 @@ const put_page: Operation = {
       },
     });
 
+    if (result.embedding?.status === 'degraded') {
+      ctx.logger.warn(`[put_page] ${result.embedding.message} ${result.embedding.suggestion}`);
+    }
+
     // The dedup pre-check in importFromContent can resolve the write to a
     // DIFFERENT page than the one requested (same content_hash, or the same
     // `frontmatter.id`), and the disk write-through below runs against that
@@ -835,6 +839,7 @@ const put_page: Operation = {
       // importFromContent's error text through. capture delegates here, so
       // it inherits the reason too.
       ...(result.error ? { error: result.error } : {}),
+      ...(result.embedding ? { embedding: result.embedding } : {}),
       ...(chunkSkipReason ? { chunk_skip_reason: chunkSkipReason } : {}),
       ...(autoLinks ? { auto_links: autoLinks } : {}),
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),

@@ -11,11 +11,8 @@ import { findChunkForOffset } from './chunkers/edge-extractor.ts';
 import { planEmbeddingReuse } from './embed-reuse.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
 import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
-// #3374 — import-path embeds ride the shared retry loop (429 retry-after +
-// transient network backoff) instead of bare embedBatch, so one socket blip
-// mid-sync no longer aborts the whole file import. Same core→commands edge
-// precedent as embed-stale.ts.
 import { embedBatchWithBackoff } from './embed-retry.ts';
+import { embedBatchForImport, type EmbeddingDegradation } from './embedding-failure.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
 import type { ChunkInput, PageInput, PageType } from './types.ts';
 import { computeEffectiveDate } from './effective-date.ts';
@@ -242,6 +239,7 @@ export interface ImportResult {
   status: 'imported' | 'skipped' | 'error';
   chunks: number;
   error?: string;
+  embedding?: EmbeddingDegradation;
   /**
    * Parsed page content. Present for status='imported' AND status='skipped'
    * (skip happens when content is identical to existing page; auto-link still
@@ -926,6 +924,7 @@ export async function importFromContent(
     effectiveCRMode = resolution.mode === 'per_chunk_synopsis' ? 'title' : resolution.mode;
   }
 
+  let embeddingDegradation: EmbeddingDegradation | undefined;
   if (!opts.noEmbed && chunks.length > 0) {
     const safeTitle = sanitizeTitle(parsed.title);
     const prefix =
@@ -935,12 +934,15 @@ export async function importFromContent(
     const wrappedTexts = prefix
       ? chunks.map((c) => wrapChunkForEmbedding(c.chunk_text, prefix, c.chunk_source))
       : chunks.map((c) => c.chunk_text);
-    const embeddings = await embedBatchWithBackoff(wrappedTexts);
-    for (let i = 0; i < chunks.length; i++) {
-      chunks[i].embedding = embeddings[i];
-      // token_count tracks the wrapped string length so cost reporting
-      // reflects what we actually sent to the embedder.
-      chunks[i].token_count = Math.ceil(wrappedTexts[i].length / 4);
+    const embedded = await embedBatchForImport(wrappedTexts);
+    if ('degradation' in embedded) {
+      embeddingDegradation = embedded.degradation;
+    } else {
+      for (let i = 0; i < chunks.length; i++) {
+        chunks[i].embedding = embedded.vectors[i];
+        // token_count tracks the wrapped string length sent to the embedder.
+        chunks[i].token_count = Math.ceil(wrappedTexts[i].length / 4);
+      }
     }
   }
 
@@ -1013,12 +1015,8 @@ export async function importFromContent(
       // import / explicit allow_empty); otherwise the engine guard stays on.
     }, opts.allowEmptyOverwrite === true ? { ...txOpts, allowEmptyOverwrite: true } : txOpts);
 
-    // v0.40.3.0: stamp the contextual retrieval state columns alongside
-    // the page write. updatePageContextualRetrievalState is a narrow
-    // UPDATE that runs after putPage's INSERT/UPDATE so the row exists.
-    // For opts.noEmbed callers, we skip stamping — the next embed pass
-    // (gbrain embed --stale or contextual reindex Minion) will set it.
-    if (!opts.noEmbed) {
+    // Deferred or degraded embeddings must not claim enrichment succeeded.
+    if (!opts.noEmbed && !embeddingDegradation) {
       await tx.updatePageContextualRetrievalState(
         slug,
         sourceId ?? 'default',
@@ -1056,7 +1054,7 @@ export async function importFromContent(
       // embedded (not --no-embed), so a later model/dims swap is detectable
       // as stale via embed --stale. The deferred/backfill + per-slug embed
       // paths stamp too; this covers the inline import/sync path.
-      if (!opts.noEmbed) {
+      if (!opts.noEmbed && !embeddingDegradation) {
         // D9: signature is null when the gateway is unconfigured — skip the
         // stamp (a wrong signature is worse than none).
         const importSig = currentEmbeddingSignature();
@@ -1158,6 +1156,7 @@ export async function importFromContent(
     slug,
     status: 'imported',
     chunks: chunks.length,
+    ...(embeddingDegradation ? { embedding: embeddingDegradation } : {}),
     parsedPage,
     ...(pageQuarantined ? { quarantined: true } : {}),
     ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}),
