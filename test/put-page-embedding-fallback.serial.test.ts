@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from '
 import { createHash, randomBytes } from 'node:crypto';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { embedStalePages } from '../src/core/embed-stale.ts';
+import { classifyEmbeddingFailure } from '../src/core/embedding-failure.ts';
 import { startHttpTransport } from '../src/mcp/http-transport.ts';
 import {
   __setEmbedTransportForTests,
@@ -118,6 +119,7 @@ describe('#40 — remote MCP put_page survives embedding-provider failure', () =
         reason: string;
         message: string;
         suggestion: string;
+        attempted_chunks: number;
       };
     };
     expect(put.slug).toBe(slug);
@@ -126,6 +128,7 @@ describe('#40 — remote MCP put_page survives embedding-provider failure', () =
     expect(put.embedding?.status).toBe('degraded');
     expect(put.embedding?.error_code).toBe('embedding_failed');
     expect(put.embedding?.reason).toBe('quota_exhausted');
+    expect(put.embedding?.attempted_chunks).toBe(put.chunks);
     expect(put.embedding?.message).toContain('persisted without embeddings');
     expect(put.embedding?.suggestion).toContain('gbrain embed --stale');
     expect(put.embedding?.message).not.toContain('sk-test');
@@ -169,5 +172,18 @@ describe('#40 — remote MCP put_page survives embedding-provider failure', () =
     });
     expect(recoveredChunks.every((chunk) => chunk.embedding != null)).toBe(true);
     expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(0);
+  });
+
+  test('classifies provider failures into the bounded, sanitized contract', () => {
+    const cases = [
+      ['quota exhausted trace=provider-private-marker', 'quota_exhausted'],
+      ['429 Too Many Requests trace=provider-private-marker', 'rate_limited'],
+      ['401 Unauthorized: api key rejected trace=provider-private-marker', 'authentication_failed'],
+      ['socket hang up trace=provider-private-marker', 'provider_unavailable'],
+    ] as const;
+
+    for (const [providerError, reason] of cases) {
+      expect(classifyEmbeddingFailure(new Error(providerError))).toBe(reason);
+    }
   });
 });

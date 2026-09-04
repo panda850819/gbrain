@@ -3,16 +3,18 @@ import { embedBatchWithBackoff } from './embed-retry.ts';
 export type EmbeddingDegradation = {
   status: 'degraded';
   error_code: 'embedding_failed';
-  reason: 'quota_exhausted' | 'provider_unavailable';
+  reason: 'quota_exhausted' | 'rate_limited' | 'authentication_failed' | 'provider_unavailable';
   message: string;
   suggestion: string;
+  attempted_chunks: number;
 };
 
-function failureReason(error: unknown): EmbeddingDegradation['reason'] {
+export function classifyEmbeddingFailure(error: unknown): EmbeddingDegradation['reason'] {
   const message = error instanceof Error ? error.message : String(error);
-  return /credit|quota|billing|payment required/i.test(message)
-    ? 'quota_exhausted'
-    : 'provider_unavailable';
+  if (/credit|quota|billing|payment required/i.test(message)) return 'quota_exhausted';
+  if (/429|rate.?limit|too many requests/i.test(message)) return 'rate_limited';
+  if (/401|403|auth|api key|unauthor/i.test(message)) return 'authentication_failed';
+  return 'provider_unavailable';
 }
 
 export async function embedBatchForImport(
@@ -23,16 +25,15 @@ export async function embedBatchForImport(
     if (vectors.length !== texts.length) throw new Error('Embedding vector count mismatch.');
     return { vectors };
   } catch (error: unknown) {
-    const reason = failureReason(error);
+    const reason = classifyEmbeddingFailure(error);
     return {
       degradation: {
         status: 'degraded',
         error_code: 'embedding_failed',
         reason,
-        message: reason === 'quota_exhausted'
-          ? 'Embedding provider quota is exhausted; page content was persisted without embeddings.'
-          : 'Embedding provider was unavailable; page content was persisted without embeddings.',
+        message: `Embedding provider ${reason.replaceAll('_', ' ')}; page content was persisted without embeddings.`,
         suggestion: 'Restore the embedding provider, then run `gbrain embed --stale` to backfill.',
+        attempted_chunks: texts.length,
       },
     };
   }
