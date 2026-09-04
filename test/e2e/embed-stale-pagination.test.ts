@@ -214,6 +214,22 @@ describeE2E('embed --stale cursor pagination (D7 + REGRESSION)', () => {
     for (const row of otherRows) expect(row.source_id).toBe('other-source');
   });
 
+  test('soft-deleted pages are excluded from stale count and cursor scan', async () => {
+    const engine = getEngine();
+    await getConn()`TRUNCATE content_chunks, pages CASCADE`;
+    await seedNullChunks({ sourceId: 'default', pageCount: 1, chunksPerPage: 2, slugPrefix: 'live-case' });
+    await seedNullChunks({ sourceId: 'default', pageCount: 1, chunksPerPage: 3, slugPrefix: 'deleted-case' });
+    await getConn()`
+      UPDATE pages SET deleted_at = now()
+      WHERE source_id = 'default' AND slug = 'deleted-case-0000'
+    `;
+
+    expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(2);
+    const rows = await engine.listStaleChunks({ sourceId: 'default', batchSize: 100 });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.slug === 'live-case-0000')).toBe(true);
+  });
+
   test('duplicate slug across sources: cursor on (page_id, chunk_index) keeps them separate', async () => {
     const engine = getEngine();
     await getConn()`TRUNCATE content_chunks, pages CASCADE`;

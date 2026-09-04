@@ -3283,8 +3283,8 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   /**
-   * Build the stale-chunk WHERE clause + positional params. embed_skip is
-   * always excluded. `signature` widens "stale" to include embedding_signature
+   * Build the stale-chunk WHERE clause + positional params. Soft-deleted and
+   * embed_skip pages are always excluded. `signature` widens "stale" to include embedding_signature
    * drift (NULL grandfathered → never stale). `includeNullSignature` (#3391)
    * lifts the grandfather clause so pre-stamp pages count as stale too
    * (provider-migration paths). Shared by countStaleChunks +
@@ -3303,7 +3303,7 @@ export class PGLiteEngine implements BrainEngine {
     } else {
       conds.push(`${staleColRef} IS NULL`);
     }
-    conds.push(`NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
+    conds.push(`p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
       conds.push(`p.source_id = $${params.length}`);
@@ -3455,7 +3455,7 @@ export class PGLiteEngine implements BrainEngine {
              FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
             WHERE cc.${staleColId} IS NULL
-              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+              AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
             LIMIT $1`,
           [limit],
@@ -3466,7 +3466,7 @@ export class PGLiteEngine implements BrainEngine {
              FROM content_chunks cc
              JOIN pages p ON p.id = cc.page_id
             WHERE cc.${staleColId} IS NULL
-              AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+              AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
               AND (
                 p.updated_at < $1::timestamptz
                 OR (p.updated_at = $1::timestamptz AND p.id > $2)
@@ -3486,7 +3486,7 @@ export class PGLiteEngine implements BrainEngine {
            JOIN pages p ON p.id = cc.page_id
           WHERE cc.${staleColId} IS NULL
             AND p.source_id = $1
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+            AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
           LIMIT $2`,
         [opts.sourceId, limit],
@@ -3498,7 +3498,7 @@ export class PGLiteEngine implements BrainEngine {
            JOIN pages p ON p.id = cc.page_id
           WHERE cc.${staleColId} IS NULL
             AND p.source_id = $1
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+            AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (
               p.updated_at < $2::timestamptz
               OR (p.updated_at = $2::timestamptz AND p.id > $3)
@@ -3522,7 +3522,7 @@ export class PGLiteEngine implements BrainEngine {
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
           WHERE cc.${staleColId} IS NULL
-            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+            AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (cc.page_id, cc.chunk_index) > ($1, $2)
           ORDER BY cc.page_id, cc.chunk_index
           LIMIT $3`,
@@ -3537,7 +3537,7 @@ export class PGLiteEngine implements BrainEngine {
          JOIN pages p ON p.id = cc.page_id
         WHERE cc.${staleColId} IS NULL
           AND p.source_id = $1
-          AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+          AND p.deleted_at IS NULL AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (cc.page_id, cc.chunk_index) > ($2, $3)
         ORDER BY cc.page_id, cc.chunk_index
         LIMIT $4`,

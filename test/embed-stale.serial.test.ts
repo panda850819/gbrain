@@ -79,6 +79,17 @@ describe('embedStaleForSource', () => {
     });
   });
 
+  test('soft-deleted pages are excluded from stale count and listing', async () => {
+    await seedPageWithStaleChunks('live', 2);
+    await seedPageWithStaleChunks('deleted', 3);
+    expect(await engine.softDeletePage('deleted')).toEqual({ slug: 'deleted' });
+
+    expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(2);
+    const rows = await engine.listStaleChunks({ sourceId: 'default', batchSize: 100 });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.slug === 'live')).toBe(true);
+  });
+
   test('embeds every stale chunk across multiple pages in one call', async () => {
     await seedPageWithStaleChunks('a', 5);
     await seedPageWithStaleChunks('b', 3);
