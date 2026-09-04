@@ -118,6 +118,7 @@ describe('#40 — remote MCP put_page survives embedding-provider failure', () =
         reason: string;
         message: string;
         suggestion: string;
+        attempted_chunks: number;
       };
     };
     expect(put.slug).toBe(slug);
@@ -126,6 +127,7 @@ describe('#40 — remote MCP put_page survives embedding-provider failure', () =
     expect(put.embedding?.status).toBe('degraded');
     expect(put.embedding?.error_code).toBe('embedding_failed');
     expect(put.embedding?.reason).toBe('quota_exhausted');
+    expect(put.embedding?.attempted_chunks).toBe(put.chunks);
     expect(put.embedding?.message).toContain('persisted without embeddings');
     expect(put.embedding?.suggestion).toContain('gbrain embed --stale');
     expect(put.embedding?.message).not.toContain('sk-test');
