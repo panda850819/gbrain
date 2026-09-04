@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from '
 import { createHash, randomBytes } from 'node:crypto';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { embedStalePages } from '../src/core/embed-stale.ts';
-import { classifyEmbeddingFailure } from '../src/core/embedding-failure.ts';
+import { embedBatchForImport, classifyEmbeddingFailure } from '../src/core/embedding-failure.ts';
 import { startHttpTransport } from '../src/mcp/http-transport.ts';
 import {
   __setEmbedTransportForTests,
@@ -172,6 +172,27 @@ describe('#40 — remote MCP put_page survives embedding-provider failure', () =
     });
     expect(recoveredChunks.every((chunk) => chunk.embedding != null)).toBe(true);
     expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(0);
+  });
+
+  test('does not retry a quota failure reported as HTTP 429', async () => {
+    let attempts = 0;
+    __setEmbedTransportForTests(async () => {
+      attempts += 1;
+      const error = new Error('[embed] You have no credits remaining.');
+      Object.assign(error, { cause: { status: 429 } });
+      throw error;
+    });
+
+    const started = Date.now();
+    const result = await embedBatchForImport(['quota fallback']);
+    const elapsedMs = Date.now() - started;
+    expect('degradation' in result).toBe(true);
+    if ('degradation' in result) {
+      expect(result.degradation.reason).toBe('quota_exhausted');
+      expect(result.degradation.attempted_chunks).toBe(1);
+    }
+    expect(attempts).toBe(1);
+    expect(elapsedMs).toBeLessThan(5_000);
   });
 
   test('classifies provider failures into the bounded, sanitized contract', () => {

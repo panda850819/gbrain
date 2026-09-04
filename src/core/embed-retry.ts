@@ -72,6 +72,8 @@ export const RATE_LIMIT_JITTER = 0.3;
 
 export interface EmbedBatchWithBackoffOpts {
   abortSignal?: AbortSignal;
+  /** Optional caller veto for errors that are not worth retrying. */
+  allowRetry?: (error: unknown) => boolean;
 }
 
 /**
@@ -229,10 +231,13 @@ export async function embedBatchWithBackoff(
       if (signal?.aborted) throw e;
       const msg = e instanceof Error ? e.message : String(e);
       const rateLimitish = isEmbedRetriableError(e);
+      // #40: callers may veto retries for permanent provider failures (for
+      // example, a quota-exhausted 429). The shared default remains unchanged.
+      const retryAllowed = opts.allowRetry?.(e) ?? true;
       // #3374 — transient NETWORK blips (socket timeout / conn reset) get a
       // plain bounded backoff beside the 429/gateway retry-after path.
       const netTransient = !rateLimitish && isTransientNetworkEmbedError(e);
-      if ((!rateLimitish && !netTransient) || attempt === MAX_RATE_LIMIT_RETRIES) throw e;
+      if (!retryAllowed || (!rateLimitish && !netTransient) || attempt === MAX_RATE_LIMIT_RETRIES) throw e;
 
       // #3796: 429s take the attempt-floored wait (rolling-TPM-aware);
       // network blips keep their own bounded exponential ladder.

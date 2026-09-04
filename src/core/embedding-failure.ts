@@ -21,7 +21,12 @@ export async function embedBatchForImport(
   texts: string[],
 ): Promise<{ vectors: Float32Array[] } | { degradation: EmbeddingDegradation }> {
   try {
-    const vectors = await embedBatchWithBackoff(texts);
+    const vectors = await embedBatchWithBackoff(texts, {
+      allowRetry: (error) => {
+        const reason = classifyEmbeddingFailure(error);
+        return reason !== 'quota_exhausted' && reason !== 'authentication_failed';
+      },
+    });
     if (vectors.length !== texts.length) throw new Error('Embedding vector count mismatch.');
     return { vectors };
   } catch (error: unknown) {
