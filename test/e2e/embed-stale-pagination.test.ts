@@ -20,6 +20,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { hasDatabase, setupDB, teardownDB, getEngine } from './helpers.ts';
 import { getConnection } from '../../src/core/db.ts';
+import { embedStaleForSource } from '../../src/core/embed-stale.ts';
 
 const getConn = getConnection;
 
@@ -228,6 +229,69 @@ describeE2E('embed --stale cursor pagination (D7 + REGRESSION)', () => {
     const rows = await engine.listStaleChunks({ sourceId: 'default', batchSize: 100 });
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.slug === 'live-case-0000')).toBe(true);
+  });
+
+  test('getHealth embedding aggregates match the live stale scan', async () => {
+    const engine = getEngine();
+    await getConn()`TRUNCATE content_chunks, pages CASCADE`;
+    await seedNullChunks({ sourceId: 'default', pageCount: 1, chunksPerPage: 2, slugPrefix: 'live-health' });
+    await seedNullChunks({ sourceId: 'default', pageCount: 1, chunksPerPage: 3, slugPrefix: 'deleted-health' });
+    await getConn()`
+      UPDATE pages SET deleted_at = now()
+      WHERE source_id = 'default' AND slug = 'deleted-health-0000'
+    `;
+
+    const stale = await engine.countStaleChunks({ sourceId: 'default' });
+    const health = await engine.getHealth({ sourceId: 'default' });
+    expect(stale).toBe(2);
+    expect(health.embed_coverage).toBe(0);
+    expect(health.missing_embeddings).toBe(stale);
+  });
+
+  test('deleted-only chunks are vacuous healthy coverage', async () => {
+    const engine = getEngine();
+    await getConn()`TRUNCATE content_chunks, pages CASCADE`;
+    await seedNullChunks({ sourceId: 'default', pageCount: 1, chunksPerPage: 3, slugPrefix: 'deleted-only' });
+    await getConn()`
+      UPDATE pages SET deleted_at = now()
+      WHERE source_id = 'default' AND slug = 'deleted-only-0000'
+    `;
+
+    const health = await engine.getHealth({ sourceId: 'default' });
+    expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(0);
+    expect(health.embed_coverage).toBe(1);
+    expect(health.missing_embeddings).toBe(0);
+  });
+
+  test('backfill clears health aggregates without processing deleted chunks', async () => {
+    const engine = getEngine();
+    await getConn()`TRUNCATE content_chunks, pages CASCADE`;
+    await seedNullChunks({ sourceId: 'default', pageCount: 1, chunksPerPage: 2, slugPrefix: 'live-backfill' });
+    await seedNullChunks({ sourceId: 'default', pageCount: 1, chunksPerPage: 3, slugPrefix: 'deleted-backfill' });
+    await getConn()`
+      UPDATE pages SET deleted_at = now()
+      WHERE source_id = 'default' AND slug = 'deleted-backfill-0000'
+    `;
+
+    const before = await engine.getHealth({ sourceId: 'default' });
+    expect(before.embed_coverage).toBe(0);
+    expect(before.missing_embeddings).toBe(2);
+
+    const result = await embedStaleForSource(engine, 'default', {
+      embedFn: async (texts) => texts.map(() => new Float32Array(1536).fill(0.1)),
+    });
+    expect(result.embedded).toBe(2);
+
+    const after = await engine.getHealth({ sourceId: 'default' });
+    expect(after.embed_coverage).toBe(1);
+    expect(after.missing_embeddings).toBe(0);
+    expect(await engine.countStaleChunks({ sourceId: 'default' })).toBe(0);
+    const deletedStale = await getConn()`
+      SELECT count(*)::int AS n FROM content_chunks cc
+      JOIN pages p ON p.id = cc.page_id
+      WHERE p.slug = 'deleted-backfill-0000' AND cc.embedding IS NULL
+    `;
+    expect(Number(deletedStale[0]!.n)).toBe(3);
   });
 
   test('duplicate slug across sources: cursor on (page_id, chunk_index) keeps them separate', async () => {

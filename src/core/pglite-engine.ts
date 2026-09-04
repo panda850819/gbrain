@@ -5660,8 +5660,8 @@ export class PGLiteEngine implements BrainEngine {
     // dashboard, v0.10.3 metrics give entity-page-level granularity.
     // #1305: every page-scoped count here excludes soft-deleted rows — same
     // posture as getStats — so brain_score moves when the user deletes pages.
-    // Chunk/link counts stay raw (storage until the purge phase), matching
-    // getStats, and destructive-removal counts elsewhere deliberately stay raw.
+    // Embedding aggregates follow stale-scan visibility; link counts stay raw
+    // (storage until purge), matching getStats; destructive-removal counts stay raw.
     // S2: coverage + missing_embeddings key on the registry-ACTIVE column.
     // #4592: optional source scope — parity with postgres-engine.getHealth
     // (bound as $1, never interpolated; both-endpoint rule for link-derived
@@ -5691,7 +5691,7 @@ export class PGLiteEngine implements BrainEngine {
               / count(*) FILTER (WHERE NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip'))::float
          END
          FROM content_chunks cc
-         JOIN scoped_pages p ON p.id = cc.page_id) as embed_coverage,
+         JOIN scoped_pages p ON p.id = cc.page_id AND p.deleted_at IS NULL) as embed_coverage,
         0 as stale_pages,
         -- Bug 11 — orphan = islanded (no inbound AND no outbound). The raw
         -- list is filtered in TS using the shared orphan-reporting policy.
@@ -5708,7 +5708,7 @@ export class PGLiteEngine implements BrainEngine {
         -- count can reach zero and the embed.stale remediation can converge.
         (SELECT count(*) FROM content_chunks cc
            JOIN scoped_pages p ON p.id = cc.page_id
-          WHERE cc.${colId} IS NULL
+          WHERE cc.${colId} IS NULL AND p.deleted_at IS NULL
             AND NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip')
         ) as missing_embeddings,
         (SELECT count(*) FROM links l

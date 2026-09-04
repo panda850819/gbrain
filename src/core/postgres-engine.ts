@@ -4945,8 +4945,8 @@ export class PostgresEngine implements BrainEngine {
     // dashboard health.
     // #1305: every page-scoped count here excludes soft-deleted rows — same
     // posture as getStats — so brain_score moves when the user deletes pages.
-    // Chunk/link counts stay raw (storage until the purge phase), matching
-    // getStats, and destructive-removal counts elsewhere deliberately stay raw.
+    // Embedding aggregates follow stale-scan visibility; link counts stay raw
+    // (storage until purge), matching getStats; destructive-removal counts stay raw.
     // S2: coverage + missing_embeddings key on the registry-ACTIVE column.
     const colId = await this.activeEmbeddingColId({ fallbackToLegacy: true });
     const [h] = await sql`
@@ -4974,7 +4974,7 @@ export class PostgresEngine implements BrainEngine {
               / count(*) FILTER (WHERE NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip'))::float
          END
          FROM content_chunks cc
-         JOIN scoped_pages p ON p.id = cc.page_id) as embed_coverage,
+         JOIN scoped_pages p ON p.id = cc.page_id AND p.deleted_at IS NULL) as embed_coverage,
         0 as stale_pages,
         0 as orphan_pages,
         (SELECT count(*) FROM links l
@@ -4998,7 +4998,7 @@ export class PostgresEngine implements BrainEngine {
         -- cannot move it and 'doctor --remediate' re-plans it every pass.
         (SELECT count(*) FROM content_chunks cc
            JOIN scoped_pages p ON p.id = cc.page_id
-          WHERE cc.${sql.unsafe(colId)} IS NULL
+          WHERE cc.${sql.unsafe(colId)} IS NULL AND p.deleted_at IS NULL
             AND NOT jsonb_exists(COALESCE(p.frontmatter, '{}'::jsonb), 'embed_skip')
         ) as missing_embeddings,
         (SELECT count(*) FROM links l
