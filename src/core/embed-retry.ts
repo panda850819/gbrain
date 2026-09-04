@@ -76,6 +76,33 @@ export interface EmbedBatchWithBackoffOpts {
   allowRetry?: (error: unknown) => boolean;
 }
 
+export type EmbeddingFailureReason =
+  | 'quota_exhausted'
+  | 'rate_limited'
+  | 'authentication_failed'
+  | 'provider_unavailable';
+
+export function classifyEmbeddingFailure(error: unknown): EmbeddingFailureReason {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/credit|quota|billing|payment required/i.test(message)) return 'quota_exhausted';
+  if (/429|rate.?limit|too many requests/i.test(message)) return 'rate_limited';
+  if (/401|403|auth|api key|unauthor/i.test(message)) return 'authentication_failed';
+  return 'provider_unavailable';
+}
+
+/** Permanent provider failures must not consume the transient retry budget. */
+export function shouldRetryEmbeddingFailure(error: unknown): boolean {
+  const reason = classifyEmbeddingFailure(error);
+  return reason !== 'quota_exhausted' && reason !== 'authentication_failed';
+}
+
+/** Apply the shared permanent-vs-transient policy at every embedding caller. */
+export function withEmbeddingRetryPolicy(
+  opts: EmbedBatchWithBackoffOpts = {},
+): EmbedBatchWithBackoffOpts {
+  return { ...opts, allowRetry: opts.allowRetry ?? shouldRetryEmbeddingFailure };
+}
+
 /**
  * Walk the cause chain looking for a 429 status. The current
  * `normalizeAIError` wraps once into `AITransientError` with `cause = original`,

@@ -11,7 +11,7 @@ import { findChunkForOffset } from './chunkers/edge-extractor.ts';
 import { planEmbeddingReuse } from './embed-reuse.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
 import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
-import { embedBatchWithBackoff } from './embed-retry.ts';
+import { embedBatchWithBackoff, withEmbeddingRetryPolicy } from './embed-retry.ts';
 import { embedBatchForImport, type EmbeddingDegradation } from './embedding-failure.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
 import type { ChunkInput, PageInput, PageType } from './types.ts';
@@ -1544,7 +1544,7 @@ export async function importCodeFile(
   if (!opts.noEmbed && needsEmbedIndexes.length > 0) {
     try {
       const textsToEmbed = needsEmbedIndexes.map((i) => chunks[i]!.chunk_text);
-      const embeddings = await embedBatchWithBackoff(textsToEmbed);
+      const embeddings = await embedBatchWithBackoff(textsToEmbed, withEmbeddingRetryPolicy());
       for (let j = 0; j < needsEmbedIndexes.length; j++) {
         const i = needsEmbedIndexes[j]!;
         chunks[i]!.embedding = embeddings[j]!;

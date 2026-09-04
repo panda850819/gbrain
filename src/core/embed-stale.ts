@@ -19,7 +19,7 @@
 
 import type { BrainEngine } from './engine.ts';
 import type { Chunk, ChunkInput } from './types.ts';
-import { embedBatchWithBackoff, restampIfDemotedToTitleTier } from './embed-retry.ts';
+import { embedBatchWithBackoff, restampIfDemotedToTitleTier, withEmbeddingRetryPolicy } from './embed-retry.ts';
 import { wrapChunkTextsForStoredMode } from './embedding-context.ts';
 import { healOversizedPageChunks, healedChunksToStaleRows } from './embed-oversize-heal.ts';
 import { invalidateStaleSignatureEmbeddingsGuarded } from './embedding-invalidation.ts';
@@ -210,7 +210,7 @@ export async function embedStalePages(
   } = {},
 ): Promise<{ embedded: number; pagesProcessed: number; aborted: boolean }> {
   const embedFn = opts.embedFn ?? (async (texts: string[], fnOpts: { abortSignal?: AbortSignal }) =>
-    embedBatchWithBackoff(texts, { abortSignal: fnOpts.abortSignal }));
+    embedBatchWithBackoff(texts, withEmbeddingRetryPolicy({ abortSignal: fnOpts.abortSignal })));
   const result = { embedded: 0, pagesProcessed: 0, aborted: false };
   // S2: stale = NULL in the registry-ACTIVE column (the one upsertChunks
   // writes) — the literal legacy `embedding` stays NULL forever on a
@@ -286,7 +286,7 @@ export async function embedStaleForSource(
   const concurrency = opts.concurrency ?? 20;
   const signal = opts.signal;
   const embedFn = opts.embedFn ?? ((texts, fnOpts) =>
-    embedBatchWithBackoff(texts, { abortSignal: fnOpts.abortSignal }));
+    embedBatchWithBackoff(texts, withEmbeddingRetryPolicy({ abortSignal: fnOpts.abortSignal })));
   // Defaulted no-op when pacing is off, so the observe()/pace() call sites
   // below are unconditional and cost ~nothing on the unpaced path.
   const pacer = opts.pacer ?? createNoopPacer();

@@ -17,6 +17,7 @@ import { invalidateStaleSignatureEmbeddingsGuarded } from '../core/embedding-inv
 import { loadConfig } from '../core/config.ts';
 import { slog, serr } from '../core/console-prefix.ts';
 import { filterOutEmbedSkipped } from '../core/embed-skip.ts';
+import { embedPageTexts } from '../core/embed-page-texts.ts';
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted, anySignal, AbortError } from '../core/abort-check.ts';
 import { type DbPacer, createDbPacer, createNoopPacer, observed } from '../core/db-pacer.ts';
@@ -28,14 +29,11 @@ import {
 } from '../core/pace-mode.ts';
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
 import { embedBackfillLockId } from '../core/embed-backfill-lock.ts';
-import { AITransientError } from '../core/ai/errors.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
 import {
   restampIfDemotedToTitleTier,
   embedBatchWithBackoff,
-  isEmbedRetriableError,
-  isTransientNetworkEmbedError,
-  type EmbedBatchWithBackoffOpts,
+  withEmbeddingRetryPolicy,
 } from '../core/embed-retry.ts';
 
 // Peeled to src/core/embed-retry.ts (core→commands layering fix: core modules
@@ -1637,7 +1635,7 @@ async function embedAllStale(
     let invalidated = 0;
     if (signatureDrift > 0) {
       const probeOk = await probeEmbedder(
-        (texts, fnOpts) => embedBatchWithBackoff(texts, { abortSignal: fnOpts.abortSignal }),
+        (texts, fnOpts) => embedBatchWithBackoff(texts, withEmbeddingRetryPolicy({ abortSignal: fnOpts.abortSignal })),
         signature,
         externalSignal,
       );
@@ -2069,79 +2067,5 @@ async function embedAllStale(
     if (remaining > 0) {
       serr(`\n  [embed] catch-up finished but ${remaining} chunk(s) remain stale after ${result.failures} embed failure(s). These are not embeddable as-is; re-running won't clear them until the underlying error is resolved.`);
     }
-  }
-}
-
-/** Walk the cause chain (like detect429FromCause) for the first HTTP status. */
-function statusFromCause(e: unknown): number | undefined {
-  let cur: unknown = e;
-  for (let depth = 0; depth < 5 && cur !== undefined && cur !== null; depth++) {
-    const obj = cur as { status?: unknown; statusCode?: unknown; cause?: unknown };
-    if (typeof obj.status === 'number') return obj.status;
-    if (typeof obj.statusCode === 'number') return obj.statusCode;
-    cur = obj.cause;
-  }
-  return undefined;
-}
-
-/**
- * #3037: embed one page's chunk texts with per-chunk failure isolation.
- *
- * All three embed paths used to send a page's chunks in ONE
- * embedBatch call, so one bad chunk (e.g. an oversized chunk the provider
- * 400s) left EVERY sibling chunk NULL — an ~8.6x blast radius. This wrapper
- * tries the batch first (the cheap, common path), and only on a
- * PERMANENT-looking batch failure retries once per chunk so one bad chunk
- * costs one chunk.
- *
- * Cost bounding — when we do NOT fan out (rethrow instead):
- *   - 429 / rate limit: embedBatchWithBackoff already retried with backoff;
- *     fanning out N single-chunk calls would hammer the same limiter N-fold.
- *   - AITransientError (5xx / network / unknown, per normalizeAIError): the
- *     batch CONTENT isn't the problem, so isolation can't help — during an
- *     outage it would just multiply failing calls per page.
- *   - 401/403 (auth): nothing chunk-specific; every call would fail.
- * When we DO fan out (permanent request-shaped 4xx like 400/413/422), the
- * per-chunk pass happens at most ONCE per page per run and re-spends roughly
- * the same tokens the failed batch would have — bounded, no recursion. A
- * fresh 429 arising DURING the fan-out still gets the normal backoff (each
- * single-chunk call goes through embedBatchWithBackoff).
- *
- * Throws when nothing could be embedded (total failure — same contract as
- * the pre-#3037 single batch call). Returns `null` at the index of each
- * failed chunk otherwise.
- */
-async function embedPageTexts(
-  texts: string[],
-  opts: EmbedBatchWithBackoffOpts = {},
-): Promise<{ embeddings: (Float32Array | null)[]; failed: number; firstError?: unknown }> {
-  try {
-    return { embeddings: await embedBatchWithBackoff(texts, opts), failed: 0 };
-  } catch (e: unknown) {
-    if (opts.abortSignal?.aborted) throw e; // shutdown, not a chunk problem
-    if (texts.length <= 1) throw e; // nothing to isolate
-    // #3374 — network-transient exhaustion isn't chunk-specific either:
-    // fanning out during an outage multiplies failing calls per page.
-    if (isEmbedRetriableError(e) || isTransientNetworkEmbedError(e) || e instanceof AITransientError) throw e;
-    const status = statusFromCause(e);
-    if (status === 401 || status === 403) throw e;
-
-    const embeddings: (Float32Array | null)[] = [];
-    let failed = 0;
-    let firstError: unknown;
-    for (const t of texts) {
-      try {
-        const single = await embedBatchWithBackoff([t], opts);
-        embeddings.push(single[0] ?? null);
-        if (single[0] === undefined) { failed++; firstError ??= e; }
-      } catch (chunkErr: unknown) {
-        if (opts.abortSignal?.aborted) throw chunkErr;
-        embeddings.push(null);
-        failed++;
-        firstError ??= chunkErr;
-      }
-    }
-    if (failed === texts.length) throw firstError ?? e; // total failure: pre-#3037 contract
-    return { embeddings, failed, firstError };
   }
 }
