@@ -13,6 +13,7 @@ import {
   configureGateway,
   resetGateway,
   rerank,
+  RerankError,
   __setRerankTransportForTests,
   _resetSunsetWarningsForTest,
 } from '../../src/core/ai/gateway.ts';
@@ -52,26 +53,39 @@ afterEach(() => {
 });
 
 describe('sunset warn-on-use (v0.46.3)', () => {
-  test('first ZE rerank prints the deprecation warning with the replacement command', async () => {
-    await rerank({ query: 'q', documents: ['a'] });
-    const all = stderrChunks.join('');
-    expect(all).toContain('DEPRECATED');
-    expect(all).toContain('2026-09-04');
-    expect(all).toContain('search.reranker.model voyage:rerank-2.5');
+  test('first ZE rerank throws the sunset error with the replacement command', async () => {
+    let err: unknown;
+    try {
+      await rerank({ query: 'q', documents: ['a'] });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(RerankError);
+    expect((err as RerankError).reason).toBe('sunset_short_circuit');
+    expect((err as RerankError).message).toContain('2026-09-04');
+    expect((err as RerankError).message).toContain('search.reranker.model voyage:rerank-2.5');
   });
 
-  test('fires once per process, not once per call', async () => {
-    await rerank({ query: 'q', documents: ['a'] });
-    await rerank({ query: 'q2', documents: ['b'] });
-    const hits = stderrChunks.join('').split('DEPRECATED').length - 1;
+  test('sunset short-circuit fires once per process, not once per call', async () => {
+    await expect(rerank({ query: 'q', documents: ['a'] })).rejects.toMatchObject({
+      reason: 'sunset_short_circuit',
+    });
+    await expect(rerank({ query: 'q2', documents: ['b'] })).rejects.toMatchObject({
+      reason: 'sunset_short_circuit',
+    });
+    const hits = stderrChunks.join('').split('rerank calls are skipped').length - 1;
     expect(hits).toBe(1);
   });
 
-  test('reset seam re-arms the warning', async () => {
-    await rerank({ query: 'q', documents: ['a'] });
+  test('reset seam re-arms the sunset short-circuit', async () => {
+    await expect(rerank({ query: 'q', documents: ['a'] })).rejects.toMatchObject({
+      reason: 'sunset_short_circuit',
+    });
     _resetSunsetWarningsForTest();
-    await rerank({ query: 'q2', documents: ['b'] });
-    const hits = stderrChunks.join('').split('DEPRECATED').length - 1;
+    await expect(rerank({ query: 'q2', documents: ['b'] })).rejects.toMatchObject({
+      reason: 'sunset_short_circuit',
+    });
+    const hits = stderrChunks.join('').split('rerank calls are skipped').length - 1;
     expect(hits).toBe(2);
   });
 

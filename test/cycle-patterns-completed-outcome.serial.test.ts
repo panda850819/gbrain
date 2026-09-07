@@ -10,8 +10,12 @@ mock.module('../src/core/ai/gateway.ts', () => ({
 }));
 
 mock.module('../src/core/cycle/synthesize.ts', () => ({
-  loadAllowedSlugPrefixes: async () => ['wiki/personal/patterns/*'],
+  loadAllowedSlugPrefixes: async () => [
+    'wiki/personal/reflections/*',
+    'wiki/personal/patterns/*',
+  ],
   loadOutputRoot: async () => 'wiki',
+  normalizeDreamNamespace: (raw: string) => raw,
   runSubagentsInline: async () => undefined,
 }));
 

@@ -501,12 +501,12 @@ describe('memorable receipts from compact() (openclaw lane)', () => {
     // Real new work behind a boundary ⇒ a SECOND receipt with a new hash,
     // carrying only the post-boundary call (span rule).
     const boundaryLine = JSON.stringify({ type: 'compaction', timestamp: 't2' });
-    wf(sessionFile, [sessionLine, msg('window one', 'search_brain'), boundaryLine, msg('window two', 'read_file')].join('\n') + '\n');
+    wf(sessionFile, [sessionLine, msg('window one', 'search_brain'), boundaryLine, msg('window two', 'search_brain')].join('\n') + '\n');
     await engine.compact({ sessionId: 'oc-mem', sessionFile });
     r = await receipts();
     expect(r).toHaveLength(2);
     expect(r[1]!.content_hash).not.toBe(r[0]!.content_hash);
-    expect(JSON.parse(r[1]!.tool_calls_json)).toEqual([{ name: 'read_file', input: null }]);
+    expect(JSON.parse(r[1]!.tool_calls_json)).toEqual([{ name: 'search_brain', input: null }]);
 
     // The relay child actually ran (fire-and-forget: poll briefly).
     const deadline = Date.now() + 3000;
