@@ -18,6 +18,19 @@ import { normalizeSubagentPageInput } from './page-input.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { WRITER_INSPECTION_HINT } from './admin-intent.ts';
 
+/** Assert an optional source expectation without changing the selected write source. */
+export function assertExpectedWriteSource(sourceId: string, raw: unknown, operation: string): void {
+  const expected = parseSourceIdParam(raw, operation);
+  if (expected === undefined) return;
+  if (sourceId !== expected) {
+    throw new OperationError(
+      'source_mismatch',
+      `${operation}: expected source '${expected}' does not match effective write source '${sourceId}'.`,
+      'Retry with the expected write source, or reconnect using a client scoped to that source.',
+    );
+  }
+}
+
 export async function requestPrincipalForContext(ctx: OperationContext): Promise<Principal> {
   if (ctx.auth?.principal) return { ...ctx.auth.principal };
   const verified = currentVerifiedLocalWriter();
@@ -51,6 +64,7 @@ export async function submitPageMutation(ctx: OperationContext,
   const p: Record<string, unknown> = { ...input.params, ...parseMutationPrecondition(input.params) };
   const requestId = typeof p.request_id === 'string' ? p.request_id : randomUUID();
   const sourceId = pageMutationSource(ctx, p, input.operation);
+  if (input.operation === 'put_page') assertExpectedWriteSource(sourceId, p.expected_source_id, input.operation);
   await initializeLocalPersistence(ctx);
   const principal = await requestPrincipalForContext(ctx);
   await assertPageRequestIdentity(ctx.engine, principal, requestId);
