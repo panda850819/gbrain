@@ -11,6 +11,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { factContractCases, exerciseManagedFacts } from './helpers/managed-facts-contract.ts';
 import { writeFactsToFence } from '../src/core/facts/fence-write.ts';
+import { __resetGuardrailProvidersForTests, registerGuardrailProvider } from '../src/core/guardrails.ts';
 
 let engine: PGLiteEngine;
 beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60_000);
@@ -67,6 +68,9 @@ test('managed extract_facts publishes multiple private entity fences and replays
       for (const slug of ['people/alice-example', 'companies/acme-example']) await engine.putPage(slug,
         { type: slug.startsWith('people') ? 'person' : 'company', title: slug, compiled_truth: 'A registered entity.' }, { sourceId: 'default' });
       await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      __resetGuardrailProvidersForTests();
+      let observations = 0;
+      registerGuardrailProvider({ id: 'managed-facts-observer', classify: () => { observations++; } });
       let calls = 0;
       __setChatTransportForTests(async () => { calls++; return { text: JSON.stringify({ facts: [
         { fact: 'Alice-example prefers weekly status reports.', kind: 'preference', entity: 'people/alice-example', confidence: 0.9, notability: 'high' },
@@ -78,11 +82,13 @@ test('managed extract_facts publishes multiple private entity fences and replays
       const first = await operationsByName.extract_facts.handler(ctx, params) as { inserted: number; fact_ids: number[] };
       expect(first.inserted).toBe(2);
       expect(first.fact_ids).toHaveLength(2);
+      expect(observations).toBe(3);
       for (const slug of ['people/alice-example', 'companies/acme-example']) expect((await engine.getPage(slug, { sourceId: 'default' }))?.compiled_truth).toContain('## Facts');
       expect(await engine.executeRaw("SELECT id FROM facts WHERE visibility='private' AND embedding IS NOT NULL")).toHaveLength(2);
       const replay = await operationsByName.extract_facts.handler(ctx, params);
       expect(replay).toMatchObject({ inserted: 2, fact_ids: first.fact_ids });
       expect(calls).toBe(1);
+      expect(observations).toBe(3);
     });
-  } finally { await disposePersistenceConsumer(engine); rmSync(home, { recursive: true, force: true }); }
+  } finally { __resetGuardrailProvidersForTests(); await disposePersistenceConsumer(engine); rmSync(home, { recursive: true, force: true }); }
 }, 60_000);

@@ -19,6 +19,7 @@ import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import { runImport } from '../src/commands/import.ts';
 import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { __resetGuardrailProvidersForTests, registerGuardrailProvider } from '../src/core/guardrails.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-file-import-'));
 const engines: BrainEngine[] = [];
@@ -119,6 +120,28 @@ test('managed directory import writes through, routes the source, resumes idempo
     writeFileSync(join(f.input, 'example.ts'), 'export const greeting = "example";\n');
     expect(await importManagedFile(engine, join(f.input, 'example.ts'), 'example.ts', { sourceId: f.sourceId, noEmbed: true })).toMatchObject({ status: 'imported' });
     expect(readFileSync(join(f.root, 'example.ts'), 'utf8')).toContain('export const greeting');
+  }
+}), 120_000);
+
+test('managed import settles hard rejection after one deferred observation without publishing file or checkpoint', async () => withEnv(env, async () => {
+  for (const engine of engines) {
+    const f = await fixture(engine), file = join(f.input, 'blocked.md');
+    writeFileSync(file, '# Blocked input\n\nCloudflare Ray ID: abc123\n');
+    await engine.setConfig('content_sanity.junk_disposition', 'reject');
+    __resetGuardrailProvidersForTests();
+    let observations = 0;
+    registerGuardrailProvider({ id: 'managed-import-rejection', classify: () => { observations++; } });
+    try {
+      await expect(importManagedFile(engine, file, 'blocked.md', { sourceId: f.sourceId, noEmbed: true })).rejects.toThrow('PAGE_JUNK_PATTERN');
+      expect(observations).toBe(1);
+      expect(await engine.getPage('blocked', { sourceId: f.sourceId })).toBeNull();
+      expect(existsSync(join(f.root, 'blocked.md'))).toBe(false);
+      expect(await engine.executeRaw("SELECT fingerprint FROM op_checkpoints WHERE op='managed-file-import' AND completed_keys::text LIKE '%blocked.md%'" )).toHaveLength(0);
+      expect(await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND slug='blocked' AND state='committed'", [f.sourceId])).toHaveLength(0);
+    } finally {
+      __resetGuardrailProvidersForTests();
+      await engine.unsetConfig('content_sanity.junk_disposition');
+    }
   }
 }), 120_000);
 

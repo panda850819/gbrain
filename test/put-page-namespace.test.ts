@@ -18,7 +18,9 @@ const put_page = operations.find(o => o.name === 'put_page') as Operation;
 if (!put_page) throw new Error('put_page op missing');
 
 function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
-  const engine = {} as BrainEngine; // dry_run short-circuits before touching the engine
+  // Ordinary remote put_page previews verify source-owned filing policy.
+  // Model a pathless legacy source so this suite remains scoped to namespaces.
+  const engine = { executeRaw: async () => [{ local_path: null }] } as unknown as BrainEngine;
   return {
     engine,
     config: { engine: 'postgres' } as any,

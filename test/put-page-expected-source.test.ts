@@ -95,7 +95,8 @@ describe('put_page expected_source_id assertion', () => {
     });
 
     expect(result).toEqual({ dry_run: true, action: 'put_page', slug: baseParams.slug });
-    expect(calls).toEqual([]);
+    expect(calls.map((call) => call.method)).toEqual(['executeRaw']);
+    expect(calls[0]?.args[1]).toEqual(['default']);
   });
 
   test("matching scalar source 'other' can pass", async () => {
@@ -106,7 +107,8 @@ describe('put_page expected_source_id assertion', () => {
     });
 
     expect(result).toMatchObject({ dry_run: true, action: 'put_page' });
-    expect(calls).toEqual([]);
+    expect(calls.map((call) => call.method)).toEqual(['executeRaw']);
+    expect(calls[0]?.args[1]).toEqual(['other']);
   });
 
   test("a missing context source uses the legacy 'default' write floor", async () => {
@@ -127,7 +129,7 @@ describe('put_page expected_source_id assertion', () => {
     const result = await putPage.handler(makeCtx('other', engine), baseParams);
 
     expect(result).toMatchObject({ dry_run: true, action: 'put_page' });
-    expect(calls).toEqual([]);
+    expect(calls.map((call) => call.method)).toEqual(['executeRaw']);
   });
 
   test('null expected_source_id has the canonical missing-value semantics', async () => {
@@ -138,7 +140,7 @@ describe('put_page expected_source_id assertion', () => {
     });
 
     expect(result).toMatchObject({ dry_run: true, action: 'put_page' });
-    expect(calls).toEqual([]);
+    expect(calls.map((call) => call.method)).toEqual(['executeRaw']);
   });
 
   for (const invalid of ['', false, 0, '__all__', 'Other', 'other/source', {}, []]) {

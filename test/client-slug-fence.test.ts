@@ -29,7 +29,9 @@ function op(name: string): Operation {
 }
 
 function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
-  const engine = {} as BrainEngine; // dry_run short-circuits before touching the engine
+  // put_page dry-run now verifies the source-owned filing policy. A pathless
+  // legacy source has no policy, while the remaining operations stay engine-free.
+  const engine = { executeRaw: async () => [{ local_path: null }] } as unknown as BrainEngine;
   return {
     engine,
     config: { engine: 'postgres' } as any,

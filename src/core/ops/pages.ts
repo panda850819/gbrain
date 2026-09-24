@@ -1,4 +1,4 @@
-import { assertExpectedWriteSource, pageMutationSource, submitPageMutation } from '../persistence/page-mutations.ts';
+import { pageMutationSource, submitPageMutation, validatePutPageDryRun } from '../persistence/page-mutations.ts';
 import { PAGE_MUTATION_PARAMS, CAPTURE_EVENT_PARAMS } from '../persistence/params.ts';
 import { assertPurgeParams } from '../persistence/purge-params.ts';
 /**
@@ -293,16 +293,7 @@ const put_page: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
-    const sourceId = pageMutationSource(ctx, p, 'put_page');
-    assertExpectedWriteSource(sourceId, p.expected_source_id, 'put_page');
-    if (ctx.dryRun) {
-      if (typeof p.slug === 'string') {
-        validatePageSlug(p.slug);
-        enforceClientSlugFence(ctx, p.slug, 'put_page');
-        enforceSubagentSlugFence(ctx, p.slug, 'put_page');
-      }
-      return { dry_run: true, action: 'put_page', slug: p.slug };
-    }
+    if (ctx.dryRun) return validatePutPageDryRun(ctx, p);
     return submitPageMutation(ctx, { operation: 'put_page', params: p });
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },

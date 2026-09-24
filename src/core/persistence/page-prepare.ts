@@ -14,6 +14,7 @@ import { recordedPathFromFileUri, scannerSourcePath } from '../write-through.ts'
 import { engineMutationPrecondition, parseMutationPrecondition } from './preconditions.ts';
 import { assertPurgeParams } from './purge-params.ts';
 import { authorizeWrite } from './authority.ts';
+import { authorizePageVisibility } from './page-visibility.ts';
 import { digest, sha256 } from './digest.ts';
 import { getWorktreeBinding } from './ownership.ts';
 import type { PreparedContentImport } from './prepared-import.ts';
@@ -27,6 +28,7 @@ import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { prepareAutomaticLinks } from './links-preparation.ts';
 import { preparePageAdvisories, remoteLinkHint, pageNoopAdvisories } from './page-advisories.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
+import { enforceStoredFilingPolicy } from '../filing-policy.ts';
 
 const PURGE_RESIDUALS = 'Brain-repo git history, synced working-tree copies, exports, compiled context files and slug-keyed derived rows (takes, open loops, file records) may still hold the content — rotate the credential and rewrite or regenerate those copies.';
 
@@ -100,6 +102,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   await assertKnowledgePublicationAllowed(engine, row);
   const p = row.intent;
   const source = { sourceId: row.source_id };
+  if (row.operation === 'put_page') await enforceStoredFilingPolicy(engine, row.authority, row.slug, row.source_id);
   const snapshot = await engine.readPageSnapshot(row.slug, { ...source, includeDeleted: true });
   assertPageRevision(snapshot, preparedIntent ? { expectedRevision: preparedIntent.expectedRevision } : engineMutationPrecondition(parseMutationPrecondition(p)));
   if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page identity changed.');
@@ -167,6 +170,9 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     const tags = versionTags ?? [...new Set([...snapshot.tags,...incoming.tags])].sort();
     if (digest(canonical(snapshot.page,snapshot.tags)) === digest(canonical(incoming,tags))) {
       return {observedRevision,noop:true,file:await prepareFileTarget(engine,row,snapshot,targetDeleted ? null : serializePageToMarkdown(snapshot.page,snapshot.tags)),
+        ...(row.operation === 'put_page' ? { validate: async (tx: BrainEngine) => {
+          await enforceStoredFilingPolicy(tx, row.authority, row.slug, row.source_id);
+        } } : {}),
         apply:async()=>({...pageNoopAdvisories(row),status:'skipped',slug:row.slug,source_id:row.source_id,noop:true,chunks:0,chunk_skip_reason:'write_skipped',
           ...(row.operation==='capture'?{channel:'capture',content_hash:p.capture_hash}:{})})};
     }
@@ -174,13 +180,24 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   let prepared: PreparedContentImport | undefined;
   let provenance: CanonicalProvenance | undefined;
   const result = await importFromContent(engine, row.slug, content, {
-    ...source, noEmbed: true, remote: row.authority.remote,
+    ...source, noEmbed: true, remote: row.authority.remote, deferPrePersistEffects: true,
     forceRechunk: row.operation === 'restore_page' || row.operation === 'revert_version',
     allowEmptyOverwrite: p.allow_empty === true || row.operation === 'restore_page' || row.operation === 'revert_version',
     source_kind: typeof p.source_kind === 'string' ? p.source_kind : null,
     source_uri: typeof p.source_uri === 'string' ? p.source_uri : null,
     ingested_via: typeof p.ingested_via === 'string' ? p.ingested_via : null,
     prepareFrontmatter: page => { provenance = putProvenance(row, snapshot, page); },
+    beforeDuplicateRedirect: async resolvedSlug => {
+      try {
+        await authorizePageVisibility(engine, row.authority, resolvedSlug);
+      } catch (error) {
+        if (error instanceof OperationError && error.code === 'page_not_found') return false;
+        throw error;
+      }
+      await authorizeWrite(engine, row.authority, row.operation, resolvedSlug);
+      await enforceStoredFilingPolicy(engine, row.authority, resolvedSlug, row.source_id);
+      return true;
+    },
     prepare: async value => { prepared = value; return value.result; },
   });
   if (!prepared) {
@@ -190,16 +207,23 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
       : 'The content was rejected before publication.');
   }
   const ready = prepared;
+  if (ready.rejection) return { observedRevision, noop: true, beforePublication: ready.beforePublication,
+    ...(row.operation === 'put_page' ? { validate: async (tx: BrainEngine) => {
+      await enforceStoredFilingPolicy(tx, row.authority, row.slug, row.source_id);
+    } } : {}),
+    apply: async () => { throw new OperationError(ready.rejection!.code, ready.rejection!.message); } };
   if (ready.observedRevision !== observedRevision) throw new OperationError('revision_conflict', 'The page changed during import preparation.');
   if (ready.slug !== row.slug) {
     await authorizeWrite(engine, row.authority, row.operation, ready.slug);
-    const duplicate = await engine.readPageSnapshot(ready.slug, { ...source, excludePrivate: row.authority.remote });
+    const duplicate = await engine.readPageSnapshot(ready.slug, { ...source, excludePrivate: row.authority.excludePrivate ?? true });
     if (!duplicate) throw new OperationError('permission_denied', 'The duplicate is not readable by this writer.');
     return { observedRevision, noop: true, additionalPageKeys:[{sourceId:row.source_id,slug:ready.slug}],validate: async tx => {
       await authorizeWrite(tx,row.authority,row.operation,ready.slug,true);
-      const current=await tx.readPageSnapshot(ready.slug,{...source,excludePrivate:row.authority.remote});
+      await authorizePageVisibility(tx,row.authority,ready.slug);
+      await enforceStoredFilingPolicy(tx, row.authority, ready.slug, row.source_id);
+      const current=await tx.readPageSnapshot(ready.slug,{...source,excludePrivate:row.authority.excludePrivate ?? true});
       if (!current || current.page.id!==duplicate.page.id || current.revision!==duplicate.revision) throw new OperationError('revision_conflict','The read-only duplicate changed during preparation.');
-    },
+    }, beforePublication: ready.beforePublication,
       apply: async () => ({ status: 'duplicate', slug: duplicate.page.slug, duplicate_revision: duplicate.revision }) };
   }
   const tags = versionTags ?? [...new Set([...(snapshot?.tags ?? []), ...ready.parsedPage.tags])].sort();
@@ -215,7 +239,11 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     ? await prepareAutomaticLinks(engine,row.slug,ready.parsedPage,row.source_id) : undefined;
   const file = await prepareFileTarget(engine, row, snapshot, targetDeleted ? null : rendered);
   const sourcePath = file ? scannerSourcePath(file.root, file.path) : undefined;
-  return { observedRevision, noop, additionalPageKeys:links?.pageKeys, file, apply: async tx => {
+  return { observedRevision, noop, additionalPageKeys:links?.pageKeys, file,
+    ...(ready.beforePublication ? { beforePublication: ready.beforePublication } : {}),
+    ...(row.operation === 'put_page' ? { validate: async (tx: BrainEngine) => {
+      await enforceStoredFilingPolicy(tx, row.authority, row.slug, row.source_id);
+    } } : {}), apply: async tx => {
     let autoLinks: Awaited<ReturnType<NonNullable<typeof links>['apply']>> | undefined;
     if (!noop) {
       await ready.apply(tx);

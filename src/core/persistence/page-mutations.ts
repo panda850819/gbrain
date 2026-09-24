@@ -17,6 +17,7 @@ import type { Principal } from './model.ts';
 import { normalizeSubagentPageInput } from './page-input.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { WRITER_INSPECTION_HINT } from './admin-intent.ts';
+import { enforceRemoteFilingPolicy } from '../filing-policy.ts';
 
 /** Assert an optional source expectation without changing the selected write source. */
 export function assertExpectedWriteSource(sourceId: string, raw: unknown, operation: string): void {
@@ -43,6 +44,22 @@ export async function requestPrincipalForContext(ctx: OperationContext): Promise
 export async function initializeLocalPersistence(ctx: OperationContext): Promise<void> {
   if (!ctx.auth && !currentVerifiedLocalWriter()) await registerLocalWriter(ctx.engine, ctx.remote === false ? 'cli' : 'stdio');
 }
+/** Validate a put_page preview through the same source, fence, and filing gates as admission. */
+export async function validatePutPageDryRun(
+  ctx: OperationContext,
+  params: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const sourceId = pageMutationSource(ctx, params, 'put_page');
+  assertExpectedWriteSource(sourceId, params.expected_source_id, 'put_page');
+  if (typeof params.slug === 'string') {
+    validatePageSlug(params.slug);
+    enforceClientSlugFence(ctx, params.slug, 'put_page');
+    enforceSubagentSlugFence(ctx, params.slug, 'put_page');
+    await enforceRemoteFilingPolicy(ctx, params.slug, sourceId);
+  }
+  return { dry_run: true, action: 'put_page', slug: params.slug };
+}
+
 /** Validate explicit routing before any admission, including dry-run adapters. */
 export function pageMutationSource(ctx: OperationContext, params: Record<string, unknown>, operation: string): string {
   const sourceId = parseSourceIdParam(params.source_id, operation) ?? ctx.sourceId ?? 'default';
@@ -64,7 +81,9 @@ export async function submitPageMutation(ctx: OperationContext,
   const p: Record<string, unknown> = { ...input.params, ...parseMutationPrecondition(input.params) };
   const requestId = typeof p.request_id === 'string' ? p.request_id : randomUUID();
   const sourceId = pageMutationSource(ctx, p, input.operation);
-  if (input.operation === 'put_page') assertExpectedWriteSource(sourceId, p.expected_source_id, input.operation);
+  if (input.operation === 'put_page') {
+    assertExpectedWriteSource(sourceId, p.expected_source_id, input.operation);
+  }
   await initializeLocalPersistence(ctx);
   const principal = await requestPrincipalForContext(ctx);
   await assertPageRequestIdentity(ctx.engine, principal, requestId);
@@ -108,6 +127,9 @@ export async function submitPageMutation(ctx: OperationContext,
   validatePageSlug(slug);
   enforceClientSlugFence(ctx, slug, input.operation);
   enforceSubagentSlugFence(ctx, slug, input.operation);
+  if (input.operation === 'put_page') {
+    await enforceRemoteFilingPolicy(ctx, slug, sourceId);
+  }
   // Preserve same-source diagnostics for new timeline writes without making
   // terminal replay depend on a page that may have since been purged.
   if (input.operation === 'add_timeline_entry') await requireWritablePage({ ...ctx, sourceId }, slug, input.operation, 'page');

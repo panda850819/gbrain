@@ -29,6 +29,7 @@ import { reconcileCanonical } from '../src/core/persistence/reconcile-merge.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { __resetGuardrailProvidersForTests, registerGuardrailProvider } from '../src/core/guardrails.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-reconcile-'));
 const engines: BrainEngine[] = [];
@@ -107,6 +108,20 @@ test('repairs claimed enabled and disabled sources without topology changes and 
     expect((await engine.executeRaw('SELECT incarnation,last_commit,last_sync_at,config FROM sources WHERE id=$1', [f.id]))[0]).toEqual(sourceBefore);
     expect((await engine.executeRaw<{ enabled: boolean }>('SELECT enabled FROM persistence_brain WHERE singleton=1'))[0].enabled).toBe(enabled);
   }
+}), 120_000);
+
+test('prepared reconciliation carries its deferred observer through durable publication', async () => isolated(async engine => {
+  const f = await fixture(engine, true);
+  await local(engine, f.registration, async () => {
+    const { row, prepared } = await preparedRepair(engine, f);
+    __resetGuardrailProvidersForTests();
+    let observations = 0;
+    registerGuardrailProvider({ id: 'managed-reconcile-observer', classify: () => { observations++; } });
+    try {
+      expect((await publishMutation(engine, row, prepared, localHostId())).state).toBe('committed');
+      expect(observations).toBe(1);
+    } finally { __resetGuardrailProvidersForTests(); }
+  });
 }), 120_000);
 
 test('same-ID replay precedes raw CAS, survives compaction and never allocates another backup', async () => isolated(async engine => {

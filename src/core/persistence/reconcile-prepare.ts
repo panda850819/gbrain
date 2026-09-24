@@ -9,7 +9,7 @@ import { OperationError } from '../ops/contract.ts';
 import { sealPageTextProjection } from '../page-state/projections.ts';
 import { sameCanonicalImport } from '../page-state/import-guard.ts';
 import { transferLegacyAtomPageState } from '../cycle/extract-atoms-page-state.ts';
-import type { PreparedContentImport } from './prepared-import.ts';
+import { preparedImportRejectionError, type PreparedContentImport } from './prepared-import.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
 import { authorizeStoredRequest } from './authority.ts';
@@ -32,7 +32,7 @@ function preservePrivateFacts(incoming: string, stored: string): string {
   const merged = restoreHiddenFactRows(next, prior);
   return merged ? replaceOrInsertFactsFence(incoming, renderFactsTable(merged.merged)) : incoming;
 }
-export async function prepareReconcileResult(engine: BrainEngine, state: ReconcileState, decisions: ReconcileDecision[]) {
+export async function prepareReconcileResult(engine: BrainEngine, state: ReconcileState, decisions: ReconcileDecision[], deferPrePersistEffects = false) {
   const merged = mergeReconcile(state.file, reconcileCanonical(state.snapshot.page, state.snapshot.tags), decisions);
   if (merged.conflicts.length) return { ...merged, ready: undefined };
   const result = merged.result;
@@ -43,7 +43,7 @@ export async function prepareReconcileResult(engine: BrainEngine, state: Reconci
   let ready: PreparedContentImport | undefined;
   const imported = await importFromContent(engine, state.pins.slug, content, {
     sourceId: state.pins.source_id, sourcePath: state.snapshot.page.source_path ?? undefined,
-    filename: basename(state.path).replace(/\.mdx?$/i, ''), noEmbed: true, remote: false, allowEmptyOverwrite: true,
+    deferPrePersistEffects, filename: basename(state.path).replace(/\.mdx?$/i, ''), noEmbed: true, remote: false, allowEmptyOverwrite: true,
     prepareFrontmatter: page => stabilizeSafetyAssessments(page.frontmatter, state.snapshot.page.frontmatter, state.pins.assessment_at),
     prepare: async prepared => { ready = prepared; return prepared.result; },
   });
@@ -68,19 +68,23 @@ export async function prepareReconcileMutation(engine: BrainEngine, row: WriteRe
   }
   const state = await readReconcileState(engine, row.source_id, row.slug, artifact.preconditions.assessment_at);
   assertReconcilePins(artifact.preconditions, state.pins);
-  const prepared = await prepareReconcileResult(engine, state, artifact.decisions);
+  const prepared = await prepareReconcileResult(engine, state, artifact.decisions, true);
   if (!prepared.ready || digest(prepared.result) !== artifact.result_digest) staleReconcile('canonical policy result changed');
   const content = serializePageToMarkdown({ ...state.snapshot.page, ...prepared.result }, prepared.result.tags);
   const ready = prepared.ready;
+  const validate = async (tx: BrainEngine) => {
+    await authorizeStoredRequest(tx, row, true);
+    assertReconcilePins(artifact.preconditions, (await readReconcileState(tx, row.source_id, row.slug, artifact.preconditions.assessment_at)).pins);
+    verifyReconcileBackup(reference, artifact);
+  };
+  const rejection = preparedImportRejectionError(ready);
+  if (rejection) return { observedRevision: state.snapshot.revision, noop: true, validate,
+    beforePublication: ready.beforePublication, apply: async () => { throw rejection; } };
   return {
     observedRevision: state.snapshot.revision,
     file: { path: state.path, root: state.root, content, expectedBeforeHash: state.pins.raw_file_hash },
     noop: ready.noop && sha256(content) === state.pins.raw_file_hash,
-    validate: async tx => {
-      await authorizeStoredRequest(tx, row, true);
-      assertReconcilePins(artifact.preconditions, (await readReconcileState(tx, row.source_id, row.slug, artifact.preconditions.assessment_at)).pins);
-      verifyReconcileBackup(reference, artifact);
-    },
+    validate, beforePublication: ready.beforePublication,
     apply: async tx => {
       await ready.apply(tx);
       if (!ready.noop) { await prepared.project!(tx); await sealPageTextProjection(tx, row.slug, row.source_id); }

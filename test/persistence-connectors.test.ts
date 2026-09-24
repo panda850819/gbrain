@@ -15,6 +15,7 @@ import { parseMarkdown } from '../src/core/markdown.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { purgeStaleCheckpoints } from '../src/core/op-checkpoint.ts';
 import { createConnectorFixture, options, json, googleConfig, githubConfig, contact, issueFixture, githubFetch, sourceCheckpoint } from './helpers/connector-fixture.ts';
+import { __resetGuardrailProvidersForTests, registerGuardrailProvider } from '../src/core/guardrails.ts';
 
 const { home, engines, env, source, boundSource, setup, teardown } = createConnectorFixture();
 beforeAll(setup, 120_000);
@@ -65,6 +66,36 @@ test('public GitHub sync imports real pages without a Git cursor or filesystem p
     expect((await engine.getPage('gh/acme-example/app/1', { sourceId: f.id }))?.compiled_truth).toContain('synthetic issue');
     expect(existsSync(join(f.dir, 'gh/acme-example/app/1.md'))).toBe(false);
     expect(await engine.executeRaw("SELECT fingerprint FROM op_checkpoints WHERE op='managed-sync'")).toHaveLength(0);
+  }
+}), 120_000);
+
+test('managed connector hard rejection observes once and cannot publish or advance its checkpoint', async () => withEnv(env, async () => {
+  for (const engine of engines) {
+    const f = await source(engine, githubConfig);
+    const blocked = { ...issueFixture, body: 'Cloudflare Ray ID: abc123' };
+    const fetcher = async (url: string) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith('/issues')) return json([blocked]);
+      if (path.endsWith('/pulls') || path.endsWith('/comments')) return json([]);
+      if (path.endsWith('/issues/1')) return json(blocked);
+      if (path === '/repos/acme-example/app') return json({ full_name: 'acme-example/app', private: true, default_branch: 'main' });
+      throw new Error('Unexpected external fixture route');
+    };
+    await engine.setConfig('content_sanity.junk_disposition', 'reject');
+    __resetGuardrailProvidersForTests();
+    let observations = 0;
+    registerGuardrailProvider({ id: 'managed-connector-rejection', classify: () => { observations++; } });
+    try {
+      await expect(runGitHubSync(engine, f.id, parseGitHubSourceConfig(githubConfig, f.dir), options, fetcher))
+        .rejects.toMatchObject({ code: 'invalid_params', writeRequest: { state: 'failed' } });
+      expect(observations).toBe(1);
+      expect(await engine.getPage('gh/acme-example/app/1', { sourceId: f.id })).toBeNull();
+      expect(await sourceCheckpoint(engine, f.id)).toHaveLength(0);
+      expect(await engine.executeRaw("SELECT id FROM persistence_requests WHERE source_id=$1 AND slug='gh/acme-example/app/1' AND state='committed'", [f.id])).toHaveLength(0);
+    } finally {
+      __resetGuardrailProvidersForTests();
+      await engine.unsetConfig('content_sanity.junk_disposition');
+    }
   }
 }), 120_000);
 

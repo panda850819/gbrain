@@ -136,11 +136,15 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
     }
   }
   let prepared: PreparedContentImport | undefined;
-  const result = await importFromContent(engine, row.slug, importContent, { ...source, noEmbed: true, remote: row.authority.remote, activePack,
+  const result = await importFromContent(engine, row.slug, importContent, { ...source, noEmbed: true, remote: row.authority.remote,
+    deferPrePersistEffects: true, activePack,
     filename: basename(p.sourcePath).replace(/\.mdx?$/i, ''), sourcePath: p.sourcePath, allowEmptyOverwrite: true,
     prepare: async value => { prepared = value; return value.result; } });
   if (!prepared) throw new OperationError('invalid_params', result.error ?? 'The sync file could not be prepared.');
   const ready = prepared;
+  if (ready.rejection) return { observedRevision: snapshot?.revision ?? null, noop: true, validate,
+    beforePublication: ready.beforePublication,
+    apply: async () => { throw new OperationError(ready.rejection!.code, ready.rejection!.message); } };
   if (ready.observedRevision !== (snapshot?.revision ?? null)) throw new OperationError('revision_conflict', 'The page changed during sync preparation.');
   if (ready.slug !== row.slug) {
     // Cross-slug dedup must never advance the origin's checkpoint without a
@@ -157,6 +161,7 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
   if (overlay && !p.lineEndingOnly && p.rawHash !== sha256(p.content)) throw new OperationError('source_changed', 'Canonical sanitization cannot overwrite newer working-tree bytes.');
   const project = prepareCanonicalProjections(ready.parsedPage, row.slug, row.source_id);
   return { observedRevision: snapshot?.revision ?? null, validate,
+    ...(ready.beforePublication ? { beforePublication: ready.beforePublication } : {}),
     ...(overlay ? { file: { root, path: join(root, p.path), content: serializePageToMarkdown(renderedPage, tags), expectedBeforeHash: p.rawHash } } : {}),
     apply: async tx => {
       await ready.apply(tx);

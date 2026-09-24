@@ -116,7 +116,7 @@ export async function prepareManagedFactsMutation(engine: BrainEngine, row: Writ
     if (page.observedRevision !== snapshot.revision) throw new OperationError('revision_conflict', 'The fact entity changed during preparation.');
   }
   return { observedRevision: snapshot?.revision ?? null, file: page?.file, noop: entries.every(entry => entry.duplicateId !== null || entry.duplicateOf !== undefined),
-    additionalPageKeys, validate: async tx => {
+    additionalPageKeys, beforePublication: page?.beforePublication, validate: async tx => {
       await validate(tx, true);
       await page?.validate?.(tx);
       for (const entry of entries) {

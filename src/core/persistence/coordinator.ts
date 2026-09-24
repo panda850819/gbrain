@@ -29,6 +29,8 @@ interface PreparedMutationBase {
   additionalPageKeys?: readonly {sourceId:string;slug:string}[];
   noop?: boolean;
   deferEmbedding?: boolean;
+  /** Observable effects deferred until fresh durable authorization succeeds. */
+  beforePublication?(): Promise<void>;
   /** Must perform only transaction-composable database work. */
   apply(tx: BrainEngine): Promise<Record<string, unknown>>;
   validate?(tx: BrainEngine): Promise<void>;
@@ -85,13 +87,54 @@ export function transientDatabaseFailure(error: unknown): boolean {
   return ['40001','40P01','55P03','57014','53300','57P01','57P02','57P03','08000','08003','08006','08001','08004',
     'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code));
 }
+function policyTemporarilyUnavailable(error: unknown): boolean {
+  return (error as { code?: string })?.code === 'filing_policy_unavailable';
+}
+function retryablePublicationFailure(error: unknown): boolean {
+  return transientDatabaseFailure(error) || policyTemporarilyUnavailable(error);
+}
 export async function finishUnpublishedFailure(engine: BrainEngine, row: WriteRequest, error: unknown): Promise<WriteRequest> {
   const failure = requestError(error);
-  if (mayReprepare(row, failure) || transientDatabaseFailure(error)) {
-    await releaseUnpublishedClaim(engine, row, transientDatabaseFailure(error) ? 'database_contention' : 'revision_changed_repreparing');
+  if (mayReprepare(row, failure) || retryablePublicationFailure(error)) {
+    await releaseUnpublishedClaim(engine, row, policyTemporarilyUnavailable(error) ? 'filing_policy_unavailable'
+      : transientDatabaseFailure(error) ? 'database_contention' : 'revision_changed_repreparing');
     return (await getWriteRequestById(engine, row.id))!;
   }
   return engine.transaction(tx => completeWrite(tx, row, conflictCode(failure.code) ? 'conflict' : 'failed', {}, failure));
+}
+
+const OBSERVER_TIMEOUT_MS = 5_000;
+async function validateBeforeObservation(engine: BrainEngine, row: WriteRequest, prepared: PreparedMutation, hostId: string): Promise<void> {
+  await engine.transaction(async tx => {
+    await tx.executeRaw("SELECT set_config('lock_timeout','1s',true),set_config('statement_timeout','5s',true)");
+    await guardOwnership(tx, row, hostId);
+    await authorizeStoredRequest(tx, row, true);
+    await assertKnowledgePublicationAllowed(tx, row, prepared.file);
+    const [current] = await tx.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE id=$1::uuid', [row.id]);
+    if (!current || current.execution_token !== row.execution_token || current.state !== 'running') {
+      throw new OperationError('write_claim_lost', 'Execution claim changed before observation.');
+    }
+    const snapshot = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
+    await authorizePageVisibility(tx, row.authority, row.slug);
+    if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page was deleted or recreated.');
+    if ((snapshot?.revision ?? null) !== prepared.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.');
+    await prepared.validate?.(tx);
+  });
+  if (prepared.file) {
+    if (!isWriteTargetContained(prepared.file.path, prepared.file.root)) throw new OperationError('storage_error', 'Filesystem publication requires a confined canonical owner.');
+    if (prepared.file.expectedBeforeHash !== undefined && fileHash(prepared.file.path) !== prepared.file.expectedBeforeHash) {
+      throw new OperationError('source_changed', 'The canonical file changed after preparation.');
+    }
+  }
+}
+async function runBoundedObservation(effect: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  await Promise.race([
+    effect(),
+    new Promise<void>(resolve => { timer = setTimeout(() => { timedOut = true; resolve(); }, OBSERVER_TIMEOUT_MS); timer.unref?.(); }),
+  ]).finally(() => { if (timer) clearTimeout(timer); });
+  if (timedOut) process.stderr.write('[persistence] Pre-publication observer exceeded 5s; continuing fail-open without holding publication locks.\n');
 }
 
 /**
@@ -115,6 +158,12 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       throw new OperationError('unsupported_mutation_protocol', 'Prepared mutation does not match its accepted target.');
     }
     if (skill) await assertSharedSkillPersistence(engine, row.source_id);
+    if (prepared.beforePublication) {
+      // Run observable effects only after a short authorization/revision/policy
+      // preflight. The same guards repeat under publication locks afterward.
+      await validateBeforeObservation(engine, row, prepared, hostId);
+      await runBoundedObservation(prepared.beforePublication);
+    }
     if (row.worktree_id) {
       binding = await getWorktreeBinding(engine, row.source_id, hostId);
       if (!binding || binding.owner_host_id !== hostId || !binding.local_path) {
@@ -246,7 +295,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
     if (recovery) {
       // Even a rejected prepare can retain a journal record; do not leave that
       // record unaccounted or let a sibling publication bypass its recovery.
-      const failure = !transactionBodyCompleted && !mayReprepare(row, requestError(error)) && !transientDatabaseFailure(error)
+      const failure = !transactionBodyCompleted && !mayReprepare(row, requestError(error)) && !retryablePublicationFailure(error)
         ? requestError(error) : undefined;
       try { await markRecovering(engine, row, failure ? 'publication_failed' : published ? 'commit_outcome_uncertain' : 'publication_not_started', failure); }
       catch { /* database outage: durable recovery record remains discoverable */ }

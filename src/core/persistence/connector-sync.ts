@@ -20,7 +20,7 @@ import { acquireWorktree, containsPath, getWorktreeBinding, type WorktreeBinding
 import { localHostId } from './identity.ts';
 import { assertPersistenceAccepting, startPersistenceConsumer, waitForWrite, writeResponse } from './service.ts';
 import { managedSyncAuthority, validateManagedSyncOptions, validateSyncAuthority, type SyncAuthority } from './sync-authority.ts';
-import type { PreparedContentImport } from './prepared-import.ts';
+import { preparedImportRejectionError, type PreparedContentImport } from './prepared-import.ts';
 import { persistenceFileHash, type PreparedMutation } from './coordinator.ts';
 import { isTerminal, type WriteRequest } from './model.ts';
 import { prepareFileTarget } from './page-prepare.ts';
@@ -439,20 +439,24 @@ export async function prepareConnectorMutation(engine: BrainEngine, row: WriteRe
   if (parseMarkdown(p.content, row.slug, { activePack }).slug !== row.slug) throw new OperationError('invalid_params', 'The connector content changes its page identity.');
   let prepared: PreparedContentImport | undefined;
   const result = await importFromContent(engine, row.slug, p.content, { sourceId: row.source_id, sourcePath: p.sourcePath,
-    filename: basename(p.sourcePath).replace(/\.mdx?$/i, ''), noEmbed: true, allowEmptyOverwrite: true, activePack,
+    deferPrePersistEffects: true, filename: basename(p.sourcePath).replace(/\.mdx?$/i, ''), noEmbed: true, allowEmptyOverwrite: true, activePack,
     prepareFrontmatter: page => {
       if (snapshot?.page.frontmatter.visibility === 'private') page.frontmatter.visibility = 'private';
     },
     prepare: async value => { prepared = value; return value.result; } });
   if (!prepared || prepared.slug !== row.slug) throw new OperationError('revision_conflict', result.error ?? 'A different page owns this connector content.');
   const ready = prepared;
+  const rejection = preparedImportRejectionError(ready);
+  if (rejection) return { observedRevision: snapshot?.revision ?? null, sourceExclusive: true, validate, noop: true,
+    beforePublication: ready.beforePublication, apply: async () => { throw rejection; } };
   if (ready.observedRevision !== (snapshot?.revision ?? null)) throw new OperationError('revision_conflict', 'The connector page changed during preparation.');
   const project = prepareCanonicalProjections(ready.parsedPage, row.slug, row.source_id);
   const tags = [...new Set([...(snapshot?.tags ?? []), ...ready.parsedPage.tags])].sort();
   const page: Page = { ...(snapshot?.page ?? { id: 0, slug: row.slug, source_id: row.source_id, created_at: new Date(row.created_at), updated_at: new Date(row.created_at) }), ...ready.parsedPage };
   const file = await connectorFileTarget(engine, row, snapshot, serializePageToMarkdown(page, tags), p.sourcePath, p.canonicalRoot);
   if (file && (file.path !== p.filePath || file.expectedBeforeHash !== p.fileBeforeHash)) throw new OperationError('source_changed', 'The connector canonical file changed during preparation.');
-  return { observedRevision: ready.observedRevision, sourceExclusive: true, validate, file, noop: ready.noop, deferEmbedding: p.noEmbed, apply: async tx => {
+  return { observedRevision: ready.observedRevision, sourceExclusive: true, validate, file, noop: ready.noop,
+    deferEmbedding: p.noEmbed, beforePublication: ready.beforePublication, apply: async tx => {
     await ready.apply(tx);
     if (!ready.noop) { await project(tx); await sealPageTextProjection(tx, row.slug, row.source_id); }
     return { status: ready.noop ? 'skipped' : snapshot ? 'updated' : 'created', slug: row.slug, source_id: row.source_id,

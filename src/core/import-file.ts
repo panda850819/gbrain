@@ -212,6 +212,7 @@ export async function importFromContent(
   opts: {
     /** Coordinator seam: prepare without publishing, then commit under its guarded transaction. */
     prepare?: (prepared: import('./persistence/prepared-import.ts').PreparedContentImport) => Promise<ImportResult>;
+    /** Defer observable pre-persist effects for a coordinator-backed prepare callback. */ deferPrePersistEffects?: boolean;
     /** Internal canonical metadata, after protected-body overlays and before hashing. */
     prepareFrontmatter?: (page: ParsedPage) => void;
     noEmbed?: boolean;
@@ -283,6 +284,8 @@ export async function importFromContent(
      * and reindex leave it unset so the guard stays armed.
      */
     allowEmptyOverwrite?: boolean;
+    /** Trust-boundary callback for a duplicate candidate, before reading it or emitting effects. False hides it. */
+    beforeDuplicateRedirect?: (resolvedSlug: string) => Promise<boolean | void>;
     beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>;
     onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void;
   } = {},
@@ -346,26 +349,20 @@ export async function importFromContent(
     delete parsed.frontmatter[ATOMS_SCAN_HASH_KEY];
   }
 
-  // Vendor-neutral guardrail seam (observe-only, fail-open). Runs AFTER
-  // parseMarkdown and the size guard, BEFORE content-sanity, hash compute,
-  // chunking, embedding, and DB write — so a registered guardrail sees the
-  // full markdown payload at the exact pre-persist moment. The returned
-  // verdict is intentionally ignored: this seam cannot block or mutate the
-  // ingest. No-op when zero guardrails are registered (OSS default).
-  await runGuardrails({
-    hook: 'file_storage.markdown',
-    content,
-    metadata: {
-      slug,
-      source_id: sourceId ?? 'default',
-      source_path: opts.sourcePath ?? null,
-      source_kind: opts.source_kind ?? null,
-      source_uri: opts.source_uri ?? null,
-      ingested_via: opts.ingested_via ?? null,
-      content_type: 'markdown',
+  // Defer observers until identity dedup resolves a caller-approved target.
+  const runMarkdownGuardrails = () => runGuardrails({
+    hook: 'file_storage.markdown', content, metadata: {
+      slug, source_id: sourceId ?? 'default', source_path: opts.sourcePath ?? null,
+      source_kind: opts.source_kind ?? null, source_uri: opts.source_uri ?? null,
+      ingested_via: opts.ingested_via ?? null, content_type: 'markdown',
     },
   });
-
+  const deferredSanityEffects: Array<() => void> = [];
+  const emitDeferredPrePersistEffects = async (): Promise<void> => {
+    await runMarkdownGuardrails(); for (const effect of deferredSanityEffects) effect();
+  };
+  const deferPrePersistEffects = opts.prepare !== undefined && opts.deferPrePersistEffects === true;
+  const publicationObserver = deferPrePersistEffects ? emitDeferredPrePersistEffects : undefined;
   // v0.41 content-sanity gate. Runs AFTER parseMarkdown so the assessor
   // sees the parsed body (compiled_truth + timeline), title, and
   // frontmatter; runs BEFORE the hash compute so a soft-block that
@@ -451,14 +448,12 @@ export async function importFromContent(
       // explicitly opted into the bypass and gets noisy feedback every
       // time it fires so they remember the gate is off. Audit as a
       // bypass (page lands regardless).
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-        bypass: true,
+      deferredSanityEffects.push(() => {
+        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, { bypass: true });
+        if (sanityResult.shouldQuarantine || sanityResult.shouldFlag) {
+          process.stderr.write(`[gbrain] content-sanity bypass (GBRAIN_NO_SANITY=1): ${slug} — ${sanityResult.reason_messages.join('; ')}\n`);
+        }
       });
-      if (sanityResult.shouldQuarantine || sanityResult.shouldFlag) {
-        process.stderr.write(
-          `[gbrain] content-sanity bypass (GBRAIN_NO_SANITY=1): ${slug} — ${sanityResult.reason_messages.join('; ')}\n`,
-        );
-      }
     } else if (sanityResult.shouldQuarantine) {
       // High-confidence junk (Cloudflare/CAPTCHA pattern or operator
       // literal). The detail names which fired.
@@ -470,14 +465,18 @@ export async function importFromContent(
         ? 'junk_pattern'
         : 'literal_substring';
       if (junkDisposition === 'reject') {
-        // Operator opted into hard-block. Throw with PAGE_QUARANTINE so
-        // classifyErrorCode bins it. Existing exception flow at every
-        // wrapper site (import errors counter, put_page MCP envelope,
-        // sync failure record) fires through this single throw point.
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-          disposition: 'reject',
-        });
-        throw new ContentSanityBlockError(sanityResult);
+        // Prepared hard-blocks emit observers only after durable authorization.
+        const rejection = new ContentSanityBlockError(sanityResult);
+        if (opts.prepare && deferPrePersistEffects) {
+          const result: ImportResult = { slug, status: 'error', chunks: 0, parsedPage: parsed, error: rejection.message };
+          return opts.prepare({ slug, parsedPage: parsed, observedRevision: null, noop: true, result,
+            rejection: { code: 'invalid_params', message: rejection.message },
+            beforePublication: async () => { await runMarkdownGuardrails(); logContentSanityAssessment(
+              slug, sourceId ?? 'default', sanityResult, { disposition: 'reject' }); }, apply: async () => {} });
+        }
+        await runMarkdownGuardrails();
+        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, { disposition: 'reject' });
+        throw rejection;
       }
       // Default: quarantine (hide). Page lands with the marker, writes
       // zero chunks (chunking guard below widens to isQuarantined), is
@@ -487,12 +486,10 @@ export async function importFromContent(
         bytes: sanityResult.bytes,
       });
       pageQuarantined = true;
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-        disposition: 'quarantine',
+      deferredSanityEffects.push(() => {
+        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, { disposition: 'quarantine' });
+        process.stderr.write(`[gbrain] content-sanity quarantine: ${slug} — ${detail} (hidden from search, reviewable via 'gbrain quarantine list')\n`);
       });
-      process.stderr.write(
-        `[gbrain] content-sanity quarantine: ${slug} — ${detail} (hidden from search, reviewable via 'gbrain quarantine list')\n`,
-      );
     } else if (sanityResult.shouldFlag) {
       // Fuzzy markup-heavy OR oversize. The page stays usable; the agent
       // gets warned (Garry's paradigm — "this is odd, you decide").
@@ -508,33 +505,25 @@ export async function importFromContent(
         // Oversize also skips embedding (existing embed_skip marker). The
         // chunking guard below honors it; tx.deleteChunks purges old chunks.
         parsed.frontmatter[EMBED_SKIP_KEY] = buildEmbedSkipMarker(sanityResult.bytes);
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-          disposition: 'soft_block',
+        deferredSanityEffects.push(() => {
+          logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, { disposition: 'soft_block' });
+          // #3893: console-level warnings are observed by operator log hooks.
+          console.warn(`[gbrain] content-sanity flag (oversized): ${slug} (${sanityResult.bytes} bytes) — page lands, embedding skipped, agent warned`);
         });
-        // #3893 (reimplemented from @y2688): console.warn, not bare stderr —
-        // soft_block silently drops embedding, and console-level warns are
-        // what operator log hooks and collectors can observe.
-        console.warn(
-          `[gbrain] content-sanity flag (oversized): ${slug} (${sanityResult.bytes} bytes) — page lands, embedding skipped, agent warned`,
-        );
       } else {
         // markup_heavy: page ingests NORMALLY (keeps chunks, embeds). The
         // content_flag marker rides along for the agent warning.
-        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-          disposition: 'flag',
+        deferredSanityEffects.push(() => {
+          logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, { disposition: 'flag' });
+          process.stderr.write(`[gbrain] content-sanity flag (markup_heavy): ${slug} (ratio ${sanityResult.markup_ratio?.toFixed(2)}) — stays searchable, agent warned\n`);
         });
-        process.stderr.write(
-          `[gbrain] content-sanity flag (markup_heavy): ${slug} (ratio ${sanityResult.markup_ratio?.toFixed(2)}) — stays searchable, agent warned\n`,
-        );
       }
     } else if (sanityResult.reasons.includes('oversize_warn')) {
       // Warn tier: page lands normally; lint surface picks up too.
-      logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, {
-        disposition: 'warn',
+      deferredSanityEffects.push(() => {
+        logContentSanityAssessment(slug, sourceId ?? 'default', sanityResult, { disposition: 'warn' });
+        process.stderr.write(`[gbrain] content-sanity warn: ${slug} (${sanityResult.bytes} bytes) — exceeds warn threshold, consider splitting\n`);
       });
-      process.stderr.write(
-        `[gbrain] content-sanity warn: ${slug} (${sanityResult.bytes} bytes) — exceeds warn threshold, consider splitting\n`,
-      );
     }
   }
 
@@ -664,10 +653,12 @@ export async function importFromContent(
   const needsProjectionRebuild = !opts.prepare && existing && existing.text_projection_revision !== existing.knowledge_revision;
   if (existing?.content_hash === hash && !existing.deleted_at && !opts.forceRechunk && !needsProjectionRebuild && (!opts.prepare || sameCanonicalImport(existingSnapshot, parsedPage))) {
     if (opts.prepare) {
+      if (!deferPrePersistEffects) await emitDeferredPrePersistEffects();
       const result: ImportResult = { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
       return opts.prepare({ slug, parsedPage, observedRevision: (existing as typeof existing & { knowledge_revision?: string }).knowledge_revision ?? null,
-        noop: true, result, apply: async () => {} });
+        noop: true, result, ...(publicationObserver ? { beforePublication: publicationObserver } : {}), apply: async () => {} });
     }
+    await emitDeferredPrePersistEffects();
     await persistUnchanged();
     return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
   }
@@ -686,6 +677,7 @@ export async function importFromContent(
       frontmatter: parsed.frontmatter,
     });
     if (existing.content_hash === legacyHash) {
+      await emitDeferredPrePersistEffects();
       await persistUnchanged(true);
       return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
     }
@@ -729,17 +721,24 @@ export async function importFromContent(
       );
     }
     if (dup && dup.slug !== slug) {
-      // Look up the duplicate page so we can compare frontmatter.id.
+      // Resolve visibility before effects; false is indistinguishable from no duplicate.
+      const candidateAllowed = await opts.beforeDuplicateRedirect?.(dup.slug);
+      if (candidateAllowed === false) dup = null;
+    }
+    if (dup && dup.slug !== slug) {
+      // Look up the visible duplicate page so we can compare frontmatter.id.
       const dupPage = await engine.getPage(dup.slug, { sourceId: sourceId ?? 'default' });
       const dupFmId = (dupPage?.frontmatter as Record<string, unknown> | undefined)?.id;
       const dupFmIdStr = typeof dupFmId === 'string' && dupFmId.length > 0 ? dupFmId : null;
       const sameExternalId = fmIdStr !== null && dupFmIdStr === fmIdStr;
       if (sameExternalId) {
         if (opts.prepare) {
+          if (!deferPrePersistEffects) await emitDeferredPrePersistEffects();
           const result: ImportResult = { slug: dup.slug, status: 'skipped', chunks: 0, parsedPage };
           return opts.prepare({ slug: dup.slug, parsedPage, observedRevision: (existing as (typeof existing & { knowledge_revision?: string }) | null)?.knowledge_revision ?? null,
-            noop: true, result, apply: async () => {} });
+            noop: true, result, ...(publicationObserver ? { beforePublication: publicationObserver } : {}), apply: async () => {} });
         }
+        await emitDeferredPrePersistEffects();
         // True duplicate (same external ID). Skip + log to stderr.
         process.stderr.write(
           `[import] skipping ${opts.sourcePath ?? slug}: identical to ${dup.slug} ` +
@@ -757,7 +756,7 @@ export async function importFromContent(
       );
     }
   }
-
+  if (!opts.prepare || !deferPrePersistEffects) await emitDeferredPrePersistEffects();
   // Preserve the importer projection (including fenced code and zero-chunk
   // dispositions) in the provider-free path used by background rebuilds too.
   const chunks = await prepareMarkdownChunks(parsed);
@@ -1030,6 +1029,7 @@ export async function importFromContent(
     slug, parsedPage, observedRevision: (existing as (typeof existing & { knowledge_revision?: string }) | null)?.knowledge_revision ?? null,
     noop: false, result: { slug, status: 'imported', chunks: chunks.length, parsedPage,
       ...(pageQuarantined ? { quarantined: true } : {}), ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}) },
+    ...(publicationObserver ? { beforePublication: publicationObserver } : {}),
     apply: applyPrepared,
   });
   await engine.transaction(applyPrepared).catch(async (err: unknown) => {

@@ -22,6 +22,7 @@ import { withEnv } from './helpers/with-env.ts';
 import { prepareRemoteJob, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { loadSyncFailures, syncFailuresPath } from '../src/core/sync-failure-ledger.ts';
+import { __resetGuardrailProvidersForTests, registerGuardrailProvider } from '../src/core/guardrails.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-managed-sync-'));
 const engines: BrainEngine[] = [];
@@ -65,6 +66,20 @@ test('managed schema restart preserves source and brain identities without trigg
     expect(await engine.executeRaw('SELECT enabled FROM persistence_brain WHERE singleton=1')).toEqual([{enabled:true}]);
   }
 }),120_000);
+
+test('managed sync carries deferred guardrail effects through publication', async () => withEnv({ GBRAIN_HOME: home }, async () => {
+  __resetGuardrailProvidersForTests();
+  let calls = 0;
+  registerGuardrailProvider({ id: 'managed-sync-observer', classify: () => { calls++; } });
+  try {
+    for (const engine of engines) {
+      const before = calls;
+      const f = await fixture(engine, { 'notes/observed.md': 'A managed sync observation for the guardrail.\n' });
+      expect((await performManagedSync(engine, { sourceId: f.id, noPull: true })).status).toBe('first_sync');
+      expect(calls).toBe(before + 1);
+    }
+  } finally { __resetGuardrailProvidersForTests(); }
+}), 120_000);
 
 test('imports files without rewriting bytes and checkpoints only committed page receipts', async () => withEnv({ GBRAIN_HOME: home }, async () => {
   for (const engine of engines) {

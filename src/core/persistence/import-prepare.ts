@@ -17,7 +17,7 @@ import { getWorktreeBinding } from './ownership.ts';
 import { localHostId } from './identity.ts';
 import { sha256 } from './digest.ts';
 import { prepareCanonicalProjections } from './canonical-projections.ts';
-import type { PreparedContentImport } from './prepared-import.ts';
+import { preparedImportRejectionError, type PreparedContentImport } from './prepared-import.ts';
 import type { PreparedMutation } from './coordinator.ts';
 import type { WriteRequest } from './model.ts';
 
@@ -126,9 +126,12 @@ export async function prepareManagedImportMutation(engine: BrainEngine, row: Wri
     : code
     ? await importCodeFile(engine, p.sourcePath, p.content, { ...source, noEmbed: true, prepare })
     : await importFromContent(engine, row.slug, p.content, { ...source, noEmbed: true, remote: false, prepare,
-      activePack: p.activePack, sourcePath: p.sourcePath, filename: basename(p.sourcePath, '.md'), allowEmptyOverwrite: true });
+      deferPrePersistEffects: true, activePack: p.activePack, sourcePath: p.sourcePath, filename: basename(p.sourcePath, '.md'), allowEmptyOverwrite: true });
   if (!prepared) throw new OperationError('invalid_params', result.error ?? 'The file could not be prepared.');
   const ready = prepared;
+  const rejection = preparedImportRejectionError(ready);
+  if (rejection) return { observedRevision: snapshot?.revision ?? null, noop: true, validate: checkPaths,
+    beforePublication: ready.beforePublication, apply: async () => { throw rejection; } };
   if (ready.slug !== row.slug || ready.observedRevision !== (snapshot?.revision ?? null)) throw new OperationError('revision_conflict', 'The import identity changed during preparation.');
   if (!image && !ready.parsedPage) throw new OperationError('invalid_params', 'The text import lost its prepared page.');
   const tags = [...new Set([...(snapshot?.tags ?? []), ...(ready.parsedPage?.tags ?? [])])].sort();
@@ -137,7 +140,7 @@ export async function prepareManagedImportMutation(engine: BrainEngine, row: Wri
   } as Page, tags));
   const project = code || image ? undefined : prepareCanonicalProjections(ready.parsedPage!, row.slug, row.source_id);
   return { observedRevision: ready.observedRevision, noop: ready.noop && p.targetHash === sha256(rendered),
-    deferEmbedding: image || p.noEmbed, validate: checkPaths,
+    deferEmbedding: image || p.noEmbed, validate: checkPaths, beforePublication: ready.beforePublication,
     file: { root, path, content: rendered, expectedBeforeHash: p.targetHash },
     apply: async tx => {
       await ready.apply(tx);
