@@ -17,6 +17,7 @@ import {
   type IngestionEvent,
 } from '../../src/core/ingestion/types.ts';
 import type { MinionJobContext } from '../../src/core/minions/types.ts';
+import { __resetGuardrailProvidersForTests, registerGuardrailProvider } from '../../src/core/guardrails.ts';
 
 let engine: PGLiteEngine;
 
@@ -36,6 +37,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  __resetGuardrailProvidersForTests();
 });
 
 function makeEvent(overrides: Partial<IngestionEvent> = {}): IngestionEvent {
@@ -732,6 +734,32 @@ describe('ingest_capture handler — integration with importFromContent', () => 
 
     const result2 = await handler(makeJob({ event: ev, slug: 'wiki/stable' }));
     expect(result2.status).toBe('skipped');
+  });
+
+  test('untrusted cross-slug identity collision is denied before effects without logging the private slug', async () => {
+    await engine.putPage('private/existing', {
+      type: 'note', title: 'Private', compiled_truth: 'Same body.', timeline: '',
+      frontmatter: { id: 'private-id', visibility: 'private' }, tags: [],
+    }, { sourceId: 'default' });
+    const handler = makeIngestCaptureHandler(engine);
+    const content = '---\ntitle: New\nid: private-id\n---\n\nSame body.';
+    const ev = makeEvent({ content, untrusted_payload: true });
+    let effects = 0;
+    registerGuardrailProvider({ id: 'ingest-private-dedup', classify: () => { effects++; } });
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    let stderr = '';
+    process.stderr.write = ((chunk: string | Uint8Array) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
+    try {
+      await expect(handler(makeJob({ event: ev, slug: 'inbox/private-alias' })))
+        .rejects.toThrow('cross-slug duplicate');
+    } finally {
+      process.stderr.write = originalWrite;
+      __resetGuardrailProvidersForTests();
+    }
+    expect(effects).toBe(0);
+    expect(stderr).not.toContain('private/existing');
+    expect(await engine.getPage('inbox/private-alias', { sourceId: 'default' })).toBeNull();
+    expect((await engine.getPage('private/existing', { sourceId: 'default' }))?.compiled_truth).toContain('Same body.');
   });
 
   test('chunks count is reported on imported events', async () => {

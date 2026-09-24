@@ -721,9 +721,9 @@ export async function importFromContent(
       );
     }
     if (dup && dup.slug !== slug) {
-      // Resolve visibility before effects; false is indistinguishable from no duplicate.
+      if (opts.remote && !opts.beforeDuplicateRedirect) throw new Error('Remote import cannot resolve a cross-slug duplicate without server authorization.');
       const candidateAllowed = await opts.beforeDuplicateRedirect?.(dup.slug);
-      if (candidateAllowed === false) dup = null;
+      if (candidateAllowed === false) { if (opts.remote) throw new Error('Remote import cannot resolve a hidden cross-slug duplicate.'); dup = null; }
     }
     if (dup && dup.slug !== slug) {
       // Look up the visible duplicate page so we can compare frontmatter.id.

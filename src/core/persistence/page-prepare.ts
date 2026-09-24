@@ -191,7 +191,9 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
       try {
         await authorizePageVisibility(engine, row.authority, resolvedSlug);
       } catch (error) {
-        if (error instanceof OperationError && error.code === 'page_not_found') return false;
+        if (error instanceof OperationError && error.code === 'page_not_found') {
+          throw new OperationError('permission_denied', 'The duplicate is not readable by this writer.');
+        }
         throw error;
       }
       await authorizeWrite(engine, row.authority, row.operation, resolvedSlug);

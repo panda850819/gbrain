@@ -25,8 +25,6 @@ import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { admitWrite, claimNextWrite } from '../src/core/persistence/journal.ts';
 import { finishUnpublishedFailure, publishMutation } from '../src/core/persistence/coordinator.ts';
 import type { WriteAuthority } from '../src/core/persistence/model.ts';
-import { importFromContent } from '../src/core/import-file.ts';
-import { authorizePageVisibility } from '../src/core/persistence/page-visibility.ts';
 import { preparePageMutation } from '../src/core/persistence/page-prepare.ts';
 
 const putPage = operations.find((operation) => operation.name === 'put_page')!;
@@ -449,26 +447,22 @@ describe('put_page source-owned filing policy', () => {
     expect(effects).toBe(1);
   });
 
-  test('an invisible duplicate candidate is treated as absent before effects', async () => {
+  test('an invisible duplicate candidate is denied before effects', async () => {
     const source = await registerSource(null);
     await engine.putPage('private/existing', {
       type: 'note', title: 'Private', compiled_truth: 'Same body.', timeline: '',
       frontmatter: { id: 'private-id', visibility: 'private' }, tags: [],
     }, { sourceId: source.id });
-    const authority: WriteAuthority = { version: 1, principal: { kind: 'oauth_client', id: 'visibility-test' }, remote: true,
-      excludePrivate: true, sourceId: source.id, sourceIncarnation: 'test', scopes: ['write'], operations: null, slugPrefixes: null };
-    await expect(authorizePageVisibility(engine, authority, 'private/existing')).rejects.toMatchObject({ code: 'page_not_found' });
+    const row = await claimDurableOAuthWrite(source.id, 'people/new-private-id',
+      '---\ntitle: New\ntype: note\nid: private-id\n---\n\nSame body.');
 
     let effects = 0;
     registerGuardrailProvider({ id: 'private-dedup-observer', classify: () => { effects++; } });
-    const result = await importFromContent(engine, 'people/new-private-id',
-      '---\ntitle: New\ntype: note\nid: private-id\n---\n\nSame body.', {
-        sourceId: source.id, remote: true, noEmbed: true,
-        beforeDuplicateRedirect: async () => false,
-      });
-    expect(result.slug).toBe('people/new-private-id');
-    expect(effects).toBe(1);
-    expect(await engine.getPage('people/new-private-id', { sourceId: source.id })).not.toBeNull();
+    await expect(preparePageMutation(engine, row, { engine: 'pglite' }))
+      .rejects.toMatchObject({ code: 'permission_denied' });
+    expect(effects).toBe(0);
+    expect(await engine.getPage('people/new-private-id', { sourceId: source.id })).toBeNull();
+    expect((await engine.getPage('private/existing', { sourceId: source.id }))?.compiled_truth).toContain('Same body.');
   });
 
   test('protected subagent fences keep their existing namespace contract', async () => {
