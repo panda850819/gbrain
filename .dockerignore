@@ -1,0 +1,5 @@
+.git
+.context
+node_modules
+admin/node_modules
+bin
