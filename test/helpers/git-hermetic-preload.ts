@@ -34,12 +34,15 @@ for (let i = 0; i < base; i++) {
   existingKeys.push(process.env[`GIT_CONFIG_KEY_${i}`] ?? '');
 }
 
-if (!existingKeys.includes('commit.gpgsign') && !existingKeys.includes('tag.gpgsign')) {
-  process.env[`GIT_CONFIG_KEY_${base}`] = 'commit.gpgsign';
-  process.env[`GIT_CONFIG_VALUE_${base}`] = 'false';
-  process.env[`GIT_CONFIG_KEY_${base + 1}`] = 'tag.gpgsign';
-  process.env[`GIT_CONFIG_VALUE_${base + 1}`] = 'false';
-  process.env.GIT_CONFIG_COUNT = String(base + 2);
+let next = base;
+for (const key of ['commit.gpgsign', 'tag.gpgsign']) {
+  if (existingKeys.includes(key)) continue;
+  process.env[`GIT_CONFIG_KEY_${next}`] = key;
+  process.env[`GIT_CONFIG_VALUE_${next}`] = 'false';
+  next++;
+}
+if (next !== base) {
+  process.env.GIT_CONFIG_COUNT = String(next);
   if (process.env.GBRAIN_DEBUG_PRELOAD === '1') {
     console.error('[git-hermetic-preload] gpg signing disabled for test git processes');
   }

@@ -224,7 +224,7 @@ describe('cli preflight ordering: cwd quarantine → ~/.gbrain/.env → guardrai
 const GIT_BIN = Bun.which('git');
 // util-linux `script` gives the wrapper a real pty so process.stdin.isTTY is
 // true — the only way to exercise the tty (ignore-only) SIGINT branch faithfully.
-const SCRIPT_BIN = Bun.which('script');
+const SCRIPT_BIN = process.platform === 'darwin' ? null : Bun.which('script');
 /**
  * The command line handed to `script -c`. `script` runs it through `$SHELL`
  * (falling back to /bin/sh — hermeticEnv sets no SHELL), and the pty delivers

@@ -10,6 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,10 +26,17 @@ import {
   resolveViaIpc,
   IPC_UNAVAILABLE,
 } from '../src/core/context/resolve-ipc.ts';
+import { localIpcSocketPath } from '../src/core/context/ipc-path.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const URL_A = 'postgresql://user:hunter2@db.example.com:5432/brain_a';
 const URL_B = 'postgresql://user:hunter2@db.example.com:5432/brain_b';
+
+function expectedPostgresSocket(url: string): { logical: string; physical: string } {
+  const digest = createHash('sha256').update(url).digest('hex').slice(0, 12);
+  const logical = join(ipcRunDir(), `resolve-${digest}.sock`);
+  return { logical, physical: localIpcSocketPath(logical) };
+}
 
 let tmp: string;
 
@@ -66,8 +74,10 @@ describe('resolveSocketPathForConfig (#4245)', () => {
     await inSandboxHome(() => {
       const p = resolveSocketPathForConfig({ engine: 'postgres', database_url: URL_A });
       expect(p).not.toBeNull();
-      expect(p!.startsWith(ipcRunDir())).toBe(true);
-      expect(p!).toMatch(/\/resolve-[0-9a-f]{12}\.sock$/);
+      const expected = expectedPostgresSocket(URL_A);
+      expect(p).toBe(expected.physical);
+      expect(expected.logical).toMatch(/\/resolve-[0-9a-f]{12}\.sock$/);
+      expect(expected.logical).not.toContain('hunter2');
       expect(p!).not.toContain('hunter2');
       // Deterministic: both ends (serve + hook) derive the identical path.
       expect(resolveSocketPathForConfig({ engine: 'postgres', database_url: URL_A })).toBe(p!);
@@ -88,7 +98,7 @@ describe('resolveSocketPathForConfig (#4245)', () => {
         database_path: leftover,
         database_url: URL_A,
       });
-      expect(p!.startsWith(ipcRunDir())).toBe(true);
+      expect(p).toBe(expectedPostgresSocket(URL_A).physical);
       expect(p!).not.toContain(leftover);
     });
   });

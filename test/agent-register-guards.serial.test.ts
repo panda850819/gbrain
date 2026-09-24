@@ -7,7 +7,7 @@
  * proves the guard fires pre-connect.
  */
 import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,7 +15,7 @@ const REPO = join(import.meta.dir, '..');
 
 describe('agent register pre-connect guards (cli.ts)', () => {
   test('thin client is refused with a structured JSON failure before any engine work', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'gbrain-thin-'));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-thin-'));
     const dir = join(home, '.gbrain');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'config.json'), JSON.stringify({
@@ -57,11 +57,11 @@ describe('agent register pre-connect guards (cli.ts)', () => {
 describe('agent register live-serve + duplicate-name refusals (real PGLite brain)', () => {
   /** Shared PGLite brain home for both cases: init once, ~seconds. */
   async function initBrain(): Promise<{ home: string; env: Record<string, string | undefined> }> {
-    const home = mkdtempSync(join(tmpdir(), 'gbrain-guards-'));
+    const home = mkdtempSync(join(realpathSync(tmpdir()), 'gbrain-guards-'));
     const env: Record<string, string | undefined> = { ...process.env, HOME: home, GBRAIN_HOME: home };
     delete env.GBRAIN_DATABASE_URL;
     delete env.DATABASE_URL;
-    const init = Bun.spawn(['bun', '--no-env-file', 'run', 'src/cli.ts', 'init', '--pglite'], {
+    const init = Bun.spawn(['bun', '--no-env-file', 'run', 'src/cli.ts', 'init', '--pglite', '--no-embedding'], {
       cwd: REPO, env, stdout: 'pipe', stderr: 'pipe', stdin: 'ignore',
     });
     const initOut = await new Response(init.stdout).text();
