@@ -8,6 +8,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { OperationError } from '../src/core/ops/contract.ts';
 import {
   writeFactsAbsorbLog,
   writeFactsAbsorbFailure,
@@ -64,6 +65,12 @@ describe('classifyFactsAbsorbError — reason routing', () => {
     expect(classifyFactsAbsorbError(new Error('embedOne failed: dim mismatch'))).toBe('embed_failure');
   });
 
+  test('managed writer contention → writer_coordination, not provider failure', () => {
+    expect(classifyFactsAbsorbError(
+      new OperationError('writer_lock_unavailable', 'The canonical fact writer is busy; extraction has not started.'),
+    )).toBe('writer_coordination');
+  });
+
   test('unknown error → pipeline_error fallback', () => {
     expect(classifyFactsAbsorbError(new Error('some other thing'))).toBe('pipeline_error');
     expect(classifyFactsAbsorbError('string error')).toBe('pipeline_error');
@@ -118,6 +125,7 @@ describe('writeFactsAbsorbLog — ingest_log row shape', () => {
     expect(FACTS_ABSORB_REASONS).toContain('queue_overflow');
     expect(FACTS_ABSORB_REASONS).toContain('queue_shutdown');
     expect(FACTS_ABSORB_REASONS).toContain('embed_failure');
+    expect(FACTS_ABSORB_REASONS).toContain('writer_coordination');
     expect(FACTS_ABSORB_REASONS).toContain('pipeline_error');
     // Extraction-outcome codes (keyed-but-failing states; keyless writes no row).
     expect(FACTS_ABSORB_REASONS).toContain('chat_unavailable');
@@ -129,7 +137,21 @@ describe('writeFactsAbsorbLog — ingest_log row shape', () => {
     expect(FACTS_ABSORB_REASONS).toContain('gateway_auth');
     expect(FACTS_ABSORB_REASONS).toContain('gateway_billing');
     expect(FACTS_ABSORB_REASONS).toContain('gateway_rate_limit');
-    expect(FACTS_ABSORB_REASONS.length).toBe(15);
+    expect(FACTS_ABSORB_REASONS.length).toBe(16);
+  });
+
+  test('writer contention log names coordination and never claims a provider request failed', async () => {
+    await writeFactsAbsorbFailure(
+      engine,
+      'meetings/writer-busy',
+      new OperationError('writer_lock_unavailable', 'The canonical fact writer is busy; extraction has not started.'),
+    );
+    const log = await engine.getIngestLog({ limit: 30 });
+    const ours = log.find(r => r.source_ref === 'meetings/writer-busy');
+    expect(ours?.summary).toBe(
+      'writer_coordination: canonical writer coordination unavailable (writer_lock_unavailable)',
+    );
+    expect(ours?.summary).not.toContain('provider request failed');
   });
 
   test.each([

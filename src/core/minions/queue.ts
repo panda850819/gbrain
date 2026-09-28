@@ -1737,7 +1737,7 @@ export class MinionQueue {
       }
 
       const rows = await tx.executeRaw<Record<string, unknown>>(
-        `UPDATE minion_jobs SET status = 'completed', result = $1::jsonb,
+        `UPDATE minion_jobs SET status = 'completed', result = $1::jsonb, error_text = NULL,
           finished_at = now(), lock_token = NULL, lock_until = NULL, updated_at = now()
          WHERE id = $2 AND status = 'active' AND lock_token = $3
          RETURNING *`,

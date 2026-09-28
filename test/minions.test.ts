@@ -160,6 +160,20 @@ describe('MinionQueue: State Machine', () => {
     expect(completed!.finished_at).not.toBeNull();
   });
 
+  test('retry → completed clears stale error_text', async () => {
+    const job = await queue.add('sync', {}, { max_attempts: 2 });
+    await queue.claim('tok1', 30000, 'default', ['sync']);
+    const delayed = await queue.failJob(job.id, 'tok1', 'transient writer contention', 'delayed', 0);
+    expect(delayed!.error_text).toBe('transient writer contention');
+
+    await promoteDelayedEventually();
+    const reclaimed = await queue.claim('tok2', 30000, 'default', ['sync']);
+    expect(reclaimed?.id).toBe(job.id);
+    const completed = await queue.completeJob(job.id, 'tok2', { ok: true });
+    expect(completed!.status).toBe('completed');
+    expect(completed!.error_text).toBeNull();
+  });
+
   test('active → failed via failJob', async () => {
     const job = await queue.add('sync', {});
     await queue.claim('tok1', 30000, 'default', ['sync']);

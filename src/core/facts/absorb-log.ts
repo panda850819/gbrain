@@ -17,6 +17,7 @@
  *   - 'queue_overflow'  — getFactsQueue() cap hit; oldest entry dropped.
  *   - 'queue_shutdown'  — queue rejected the enqueue because shutdown is in progress.
  *   - 'embed_failure'   — gateway down on embedOne; row inserts with NULL embedding.
+ *   - 'writer_coordination' — canonical writer contention/unavailability before any provider call.
  *   - 'pipeline_error'  — anything else absorbed inside runFactsBackstop's catch.
  *   - 'gateway_auth'    — provider authentication/authorization failed.
  *   - 'gateway_billing' — provider credit, quota, or billing hard limit failed.
@@ -38,6 +39,7 @@ export const FACTS_ABSORB_REASONS = [
   'queue_overflow',
   'queue_shutdown',
   'embed_failure',
+  'writer_coordination',
   'pipeline_error',
   // Extraction-outcome codes (keyed-but-failing states; keyless-expected
   // states deliberately write NO row — see backstop.ts
@@ -153,7 +155,13 @@ export async function writeFactsAbsorbFailure(
         ? 'gateway_rate_limit'
         : classifyFactsAbsorbError(err);
   const errorType = err instanceof Error && err.name ? err.name : 'Error';
-  await writeFactsAbsorbLog(engine, ref, reason, `provider request failed (${errorType})`, sourceId);
+  const errorCode = typeof (err as { code?: unknown } | null)?.code === 'string'
+    ? (err as { code: string }).code
+    : errorType;
+  const detail = reason === 'writer_coordination'
+    ? `canonical writer coordination unavailable (${errorCode})`
+    : `provider request failed (${errorType})`;
+  await writeFactsAbsorbLog(engine, ref, reason, detail, sourceId);
 }
 
 /**
@@ -180,6 +188,15 @@ export function classifyFactsAbsorbError(err: unknown): FactsAbsorbReason {
     }
     return 'pipeline_error';
   }
+
+  // Managed persistence may reject the job before extraction reaches chat().
+  // Keep these distinct from provider failures so ingest health cannot blame
+  // OpenAI/Anthropic for canonical writer contention.
+  const code = (err as { code?: unknown }).code;
+  if (name === 'OperationError' && typeof code === 'string' && [
+    'writer_lock_unavailable', 'writer_coordinator_required', 'writer_busy',
+    'write_pending', 'owner_unavailable', 'recovery_required', 'consumer_stopping',
+  ].includes(code)) return 'writer_coordination';
 
   // Anthropic / OpenAI / Voyage all surface 4xx/5xx + timeouts in similar shapes.
   if (/timeout|timed?\s?out|ETIMEDOUT/i.test(msg)) return 'gateway_error';
