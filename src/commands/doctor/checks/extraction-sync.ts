@@ -14,6 +14,7 @@ import { lagFromContentMs, resolveStalenessCeilingSeconds } from '../../../core/
 import { resolveEnvNumber, resolveHoursEnv, warnOnceForEnv } from '../../../core/env-number.ts';
 import { CHUNKER_VERSION } from '../../../core/chunkers/code.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from '../../../core/link-extraction.ts';
+import { extractionLivePagePredicate } from '../../../core/extraction-scope.ts';
 import { isUndefinedColumnError } from '../../../core/utils.ts';
 import {
   loadStorageConfig,
@@ -102,8 +103,8 @@ export async function checkLinksExtractionLag(
   try {
     const totalRows = await engine.executeRaw<{ count: number }>(
       sourceId
-        ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
-        : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
+        ? `SELECT count(*)::int AS count FROM pages WHERE ${extractionLivePagePredicate()} AND source_id = $1`
+        : `SELECT count(*)::int AS count FROM pages WHERE ${extractionLivePagePredicate()}`,
       sourceId ? [sourceId] : [],
     );
     const total = Number(totalRows[0]?.count ?? 0);

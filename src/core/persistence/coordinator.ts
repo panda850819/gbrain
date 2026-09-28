@@ -82,7 +82,7 @@ function requestError(error: unknown): { code: string; message: string } {
   if (code === 'revision_conflict') return { code, message: 'The page changed after the supplied revision was read.' };
   return { code: 'storage_error', message: `Publication failed${code ? ` (${code})` : ''}. Inspect owner diagnostics.` };
 }
-function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','source_changed','page_identity_changed'].includes(code); }
+function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','endpoint_revision_conflict','source_changed','page_identity_changed'].includes(code); }
 export function transientDatabaseFailure(error: unknown): boolean {
   return ['40001','40P01','55P03','57014','53300','57P01','57P02','57P03','08000','08003','08006','08001','08004',
     'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code));

@@ -7,6 +7,7 @@ import { lockPageKeys as acquirePageKeys } from './page-state/guards.ts';
 import { readPageSnapshot as readCanonicalPageSnapshot } from './page-state/snapshot.ts';
 import { createPageVersion } from './page-state/versions.ts';
 import { composablePostgresTransaction } from './page-state/transactions.ts';
+import { extractionPageTypePredicate } from './extraction-scope.ts';
 import type { PageReadScope } from './types.ts';
 import type { PageReadPolicy } from './types.ts';
 import { readRelationalFanout, readAliases, readBacklinkCounts, readAdjacencyBoosts, readContentFlags, readExtractionStates, readEffectiveDates, readSalienceScores } from './search/read-enrichment.ts';
@@ -2890,7 +2891,7 @@ export class PostgresEngine implements BrainEngine {
 
   /** Shared stale-for-extraction predicate. Returns `{ where, params }`. */
   private buildStalePagesWhere(opts?: { sourceId?: string; versionTs?: string }): { where: string; params: unknown[] } {
-    const conds: string[] = ['deleted_at IS NULL'];
+    const conds: string[] = ['deleted_at IS NULL', extractionPageTypePredicate()];
     const params: unknown[] = [];
     if (opts?.versionTs) {
       params.push(opts.versionTs);

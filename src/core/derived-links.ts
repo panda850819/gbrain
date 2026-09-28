@@ -1,5 +1,6 @@
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
 import { assertPageRevision } from './page-state/types.ts';
+import { OperationError } from './ops/contract.ts';
 import { executeRawJsonb } from './sql-query.ts';
 
 export interface DerivedLinkOrigin {
@@ -56,7 +57,7 @@ export async function replaceDerivedLinks(
     const snapshot = await tx.readPageSnapshot(origin.slug, { sourceId: origin.sourceId });
     assertPageRevision(snapshot, { expectedRevision: origin.expectedRevision });
     if (!snapshot || snapshot.sourceIncarnation !== origin.sourceIncarnation || snapshot.page.deleted_at) {
-      throw new Error('Derived link origin changed or was deleted');
+      throw new OperationError('revision_conflict', 'Derived link origin changed or was deleted');
     }
     const id = snapshot.page.id;
     if (opts.includeFrontmatter !== false) {
@@ -69,13 +70,13 @@ export async function replaceDerivedLinks(
       LEFT JOIN pages f ON f.slug=v.from_slug AND f.source_id=v.from_source_id AND f.deleted_at IS NULL
       LEFT JOIN pages t ON t.slug=v.to_slug AND t.source_id=v.to_source_id AND t.deleted_at IS NULL
       WHERE f.id IS NULL OR t.id IS NULL LIMIT 1`, [], [{ rows }]);
-    if (missing.length) throw new Error('A derived link endpoint changed or was deleted');
+    if (missing.length) throw new OperationError('endpoint_revision_conflict', 'A derived link endpoint changed or was deleted');
     if (opts.expectedEndpoints?.length) {
       const changed = await executeRawJsonb(tx, `SELECT 1 FROM jsonb_to_recordset(($1::jsonb)->'rows')
         AS v(slug text, "sourceId" text, revision text)
         LEFT JOIN pages p ON p.slug=v.slug AND p.source_id=v."sourceId" AND p.deleted_at IS NULL
         WHERE p.id IS NULL OR p.knowledge_revision::text <> v.revision LIMIT 1`, [], [{ rows: opts.expectedEndpoints }]);
-      if (changed.length) throw new Error('A derived link endpoint changed after type resolution');
+      if (changed.length) throw new OperationError('endpoint_revision_conflict', 'A derived link endpoint changed after type resolution');
     }
     const removed = await tx.executeRaw(`DELETE FROM links WHERE link_source=ANY($2::text[])
       AND (origin_page_id=$1 OR (origin_page_id IS NULL AND from_page_id=$1

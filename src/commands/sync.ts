@@ -10,6 +10,7 @@ import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { refreshProjectionStatistics } from '../core/search/projection-statistics.ts';
 import { importFile, importImageFile, isImageFilePath as isImageImportPath, MAX_FILE_SIZE } from '../core/import-file.ts';
 import { parseMarkdown } from '../core/markdown.ts';
+import { extractionLivePagePredicate } from '../core/extraction-scope.ts';
 import { validateSlug } from '../core/utils.ts';
 import { collectSyncableFiles, shouldLogIngest } from './import.ts';
 import {
@@ -35,14 +36,13 @@ import {
   renameReconcileErrorMessage,
   parseRenameReconcileFrom,
   clearFailures,
-  restoreFailures,
+  restoreFailures, type SyncManifest, type SyncFailure,
 } from '../core/sync.ts';
 import {
   computeSyncDelta,
   buildDetachedWorkingTreeManifest,
 } from '../core/sync-delta.ts';
 import { CHUNKER_VERSION } from '../core/chunkers/code.ts';
-import type { SyncManifest, SyncFailure } from '../core/sync.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { loadConfig } from '../core/config.ts';
@@ -5890,8 +5890,8 @@ async function maybeExtractionNudge(engine: BrainEngine, sourceId?: string): Pro
     const { _resolveEnvNumber, EXTRACTION_LAG_WARN_PCT_DEFAULT, EXTRACTION_LAG_MIN_PAGES } = await import('./doctor.ts');
     const totalRows = await engine.executeRaw<{ count: number }>(
       sourceId
-        ? `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL AND source_id = $1`
-        : `SELECT count(*)::int AS count FROM pages WHERE deleted_at IS NULL`,
+        ? `SELECT count(*)::int AS count FROM pages WHERE ${extractionLivePagePredicate()} AND source_id = $1`
+        : `SELECT count(*)::int AS count FROM pages WHERE ${extractionLivePagePredicate()}`,
       sourceId ? [sourceId] : [],
     );
     const total = Number(totalRows[0]?.count ?? 0);
