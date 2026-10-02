@@ -72,6 +72,9 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   // The peeled sync-* core modules (anchor/lock/reconcile/delta/git/…) all
   // feed that kill/resume journey.
   "src/core/sync-*.ts": ["test/e2e/sync-sigkill-resume-postgres.test.ts"],
+  // Legacy repo attribution + knowledge-only thin-client counters. This
+  // unions with sync-* above; unmapped doctor-remote changes still run ALL.
+  "src/core/sync-failure-ledger.ts": ["test/e2e/merge-ledger-orphan-compat-pglite.test.ts"],
   // v0.32.8 multi-source bug class regression suite — fires on any cycle
   // phase, extract, integrity, embed, or migrate-engine change.
   "src/core/cycle/extract-takes.ts": ["test/e2e/multi-source-bug-class.test.ts"],
@@ -150,6 +153,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/engine-parity.test.ts",
     "test/e2e/schema-drift.test.ts",
     "test/e2e/health-parity-postgres.test.ts",
+    "test/e2e/merge-ledger-orphan-compat-pglite.test.ts",
   ],
   // Engine method modules peeled from the façades carry the same blast
   // radius as the façades themselves.

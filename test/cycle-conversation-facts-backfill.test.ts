@@ -56,10 +56,8 @@ async function seedSource(id: string): Promise<void> {
 }
 
 beforeAll(async () => {
-  engine = new PGLiteEngine();
-  await engine.connect({});
-  await engine.initSchema();
-
+  // Pin dimensions before schema/snapshot selection, regardless of the
+  // gateway configuration left by an earlier file in the same shard.
   resetGateway();
   configureGateway({
     chat_model: 'anthropic:claude-sonnet-4-6',
@@ -67,6 +65,9 @@ beforeAll(async () => {
     embedding_dimensions: 1536,
     env: { ANTHROPIC_API_KEY: 'sk-ant-test', OPENAI_API_KEY: 'sk-test' },
   });
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
 
   __setChatTransportForTests(async (opts): Promise<ChatResult> => {
     chatCalls++;
