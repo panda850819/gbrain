@@ -1,0 +1,6 @@
+// Typed thoughts and chat snippets use the canonical capture front door,
+// not the generic entity-ingestion router or the audio-only voice skill.
+// Preserve the legacy snippet cases using capture's declared triggers.
+{"intent":"Save this thought — what I just said about the agent stack — verbatim into the brain","expected_skill":"capture"}
+{"intent":"Remember this snippet of our conversation, the bit where I framed the three stages","expected_skill":"capture"}
+{"intent":"capture this snippet from our chat, no URL just my words","expected_skill":"capture"}
