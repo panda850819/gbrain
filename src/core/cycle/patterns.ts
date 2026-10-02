@@ -19,19 +19,115 @@
  */
 
 import { join, dirname } from 'node:path';
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
-import { MinionQueue } from '../minions/queue.ts';
-import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
-import type { MinionJobInput, SubagentHandlerData } from '../minions/types.ts';
+import { DEFAULT_PRIVATE_QUEUE_LEASE_MS, MinionQueue } from '../minions/queue.ts';
+import { isQueueQuotaExceededError } from '../minions/admission.ts';
+import { waitForCompletionRenewing, TimeoutError } from '../minions/wait-for-completion.ts';
+import type { MinionJobInput, MinionJobStatus, SubagentHandlerData } from '../minions/types.ts';
 import { serializeMarkdown } from '../markdown.ts';
+import { truncateUtf8 } from '../text-safe.ts';
 import type { Page, PageType } from '../types.ts';
+// #2415: allow-list + output-root resolution shared with the synthesize
+// phase — both phases must agree on the configured namespace.
+// runSubagentsInline is shared too: a job submitted via queue.add() sits in
+// 'waiting' forever unless something drives the claim -> run -> complete
+// loop — on PGLite because no separate worker can open the embedded
+// data-dir, on Postgres because the parent phase itself occupies a worker
+// slot and can deadlock a fully-occupied worker (#2050). synthesize.ts
+// drains its own children the same way.
+import {
+  loadAllowedSlugPrefixes,
+  loadOutputRoot,
+  normalizeDreamNamespace,
+  runSubagentsInline,
+} from './synthesize.ts';
+import { probeChatModel } from '../ai/gateway.ts';
+import { normalizeModelId } from '../model-id.ts';
+import { throwIfAborted } from '../abort-check.ts';
+import { matchesSlugAllowList } from '../ops/context.ts';
 
 export interface PatternsPhaseOpts {
   brainDir: string;
   dryRun: boolean;
+  /** #4077: cooperative cancellation from the enclosing cycle/minion job. */
+  signal?: AbortSignal;
+  /** Stable cycle id forwarded to external runtime jobs. */
+  runId?: string;
   yieldDuringPhase?: () => Promise<void>;
+  /**
+   * issue #2860 — `gbrain dream --phase patterns --once`. Bypasses the
+   * `dream.patterns.enabled` gate for THIS call only; never reads or
+   * writes config.
+   */
+  once?: boolean;
+  /**
+   * Absolute deadline (epoch ms) of the enclosing minion job, or null for
+   * direct callers (`gbrain dream`). When set, the subagent's job timeout
+   * and the wait timeout are clamped so the phase finishes (or times out)
+   * BEFORE the parent job's budget expires — a fixed 30/35-min default
+   * inside an interval-derived cycle budget dead-letters the whole cycle
+   * mid-phase and starves every tail phase (#2781).
+   */
+  deadlineAtMs?: number | null;
+  /**
+   * #1586: the cycle's resolved source. Stamped onto every subagent child as
+   * `source_id` so put_page writes land in this source's rows, and passed to
+   * reverseWriteRefs so getPage/getTags read the correct (source_id, slug)
+   * row. Unset → legacy 'default'. Mirrors synthesize.ts's `sourceId`.
+   */
+  sourceId?: string;
+  /** Internal: minion owner job id for private dream-inline queue recovery. */
+  privateQueueOwnerJobId?: number | null;
+}
+
+/**
+ * Stop-margin reserved under the parent deadline when clamping subagent
+ * budgets. NOT a promise that tail phases complete — the cycle is allowed
+ * to go partial and resume next tick. This only guarantees the phase's
+ * wait returns and the handler unwinds cleanly before the worker's abort
+ * fires: wait poll interval (5s) + worker force-evict grace (30s) + lock
+ * and DB cleanup headroom.
+ *
+ * gbrain#4168: the canonical definition moved to base-phase.ts (one home for
+ * every phase); re-exported here so existing imports (tests included) keep
+ * working.
+ */
+import { CYCLE_DEADLINE_RESERVE_MS } from './base-phase.ts';
+export { CYCLE_DEADLINE_RESERVE_MS };
+
+/**
+ * Smallest remaining budget worth submitting a subagent for. Below this,
+ * the LLM call is near-certain to be killed mid-flight — wasted spend and
+ * a guaranteed-timeout child — so the phase skips honestly instead
+ * (`insufficient_cycle_budget`) and the next cycle retries with a fresh
+ * budget.
+ */
+export const MIN_PATTERNS_SUBAGENT_BUDGET_MS = 2 * 60 * 1000;
+
+/**
+ * Clamp the configured subagent budgets to the remaining parent-job time.
+ * Both timeouts derive from the SAME absolute child deadline
+ * (`deadlineAtMs - reserve`) so the child job's kill switch and our wait
+ * agree. Returns null when the remaining budget is below the minimum —
+ * caller should skip the phase without submitting.
+ */
+export function clampSubagentBudgets(
+  config: { subagentTimeoutMs: number; subagentWaitTimeoutMs: number },
+  deadlineAtMs: number | null | undefined,
+  nowMs: number,
+): { timeoutMs: number; waitTimeoutMs: number } | null {
+  if (deadlineAtMs == null) {
+    return { timeoutMs: config.subagentTimeoutMs, waitTimeoutMs: config.subagentWaitTimeoutMs };
+  }
+  const childBudgetMs = deadlineAtMs - CYCLE_DEADLINE_RESERVE_MS - nowMs;
+  if (childBudgetMs < MIN_PATTERNS_SUBAGENT_BUDGET_MS) return null;
+  return {
+    timeoutMs: Math.min(config.subagentTimeoutMs, childBudgetMs),
+    waitTimeoutMs: Math.min(config.subagentWaitTimeoutMs, childBudgetMs),
+  };
 }
 
 export async function runPhasePatterns(
@@ -39,15 +135,52 @@ export async function runPhasePatterns(
   opts: PatternsPhaseOpts,
 ): Promise<PhaseResult> {
   const start = Date.now();
+  let ownedPrivateQueue: { queue: MinionQueue; name: string } | null = null;
   try {
+    throwIfAborted(opts.signal, '[dream] patterns');
     const config = await loadPatternsConfig(engine);
 
     if (!config.enabled) {
-      return skipped('disabled', 'dream.patterns.enabled is false');
+      if (!opts.once) {
+        return skipped('disabled', 'dream.patterns.enabled is false');
+      }
+      process.stderr.write(
+        '[dream] --once: dream.patterns.enabled is false but ' +
+        '--phase patterns --once forces this run (config untouched)\n',
+      );
     }
 
-    // Gather reflections within lookback window.
-    const reflections = await gatherReflections(engine, config.lookbackDays);
+    // Validate DB-plane targets against the operator-owned file BEFORE the
+    // source prefix reaches SQL. Config can choose an approved lane, but it
+    // cannot broaden either read scope or subagent write access by itself.
+    const allowedSlugPrefixes = await loadAllowedSlugPrefixes(
+      config.outputRoot,
+      engine,
+      undefined,
+      opts.sourceId ?? 'default',
+    );
+    if (allowedSlugPrefixes.length === 0) {
+      return failed(makeError('InternalError', 'NO_ALLOWLIST',
+        'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
+    }
+    for (const target of [config.sourceSlugPrefix, config.outputSlugPrefix]) {
+      if (!matchesSlugAllowList(`${target}/__dream_policy_probe__`, allowedSlugPrefixes)) {
+        return failed(makeError(
+          'ValidationError',
+          'WRITE_TARGET_OUTSIDE_ALLOWLIST',
+          `dream patterns target "${target}" is not approved by dream_synthesize_paths.globs`,
+          'Add the exact target glob to the brain repo filing rules before changing dream.write_targets.',
+        ));
+      }
+    }
+
+    // Gather reflections within the already-approved lookback namespace.
+    const reflections = await gatherReflections(
+      engine,
+      config.lookbackDays,
+      config.sourceSlugPrefix,
+      opts.sourceId ?? 'default',
+    );
     if (reflections.length < config.minEvidence) {
       return skipped(
         'insufficient_evidence',
@@ -63,65 +196,206 @@ export async function runPhasePatterns(
       });
     }
 
-    // Submit one subagent for pattern detection.
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return skipped('no_api_key', 'ANTHROPIC_API_KEY unset; pattern detection skipped');
+    // Submit one subagent for pattern detection. The subagent dispatches via
+    // the gateway model-tier resolver, so gate on "is the resolved model's
+    // provider reachable" rather than ANTHROPIC_API_KEY specifically — a
+    // hardcoded env gate misclassified non-Anthropic stacks (litellm,
+    // deepseek, openrouter, ...) as "no upstream" even though the subagent
+    // routes them through the gateway (agent.use_gateway_loop), and it missed
+    // Anthropic keys set via `gbrain config set anthropic_api_key`. Same
+    // probe semantics as think/index.ts + synthesize's makeJudgeClient:
+    // unknown provider/model or Anthropic-without-key skips cheaply; other
+    // providers' auth is checked lazily at dispatch and surfaces in the job
+    // outcome. (Takeover of PR #2279's intent by @brettdavies.)
+    const probe = probeChatModel(normalizeModelId(config.model));
+    if (!probe.ok) {
+      return skipped('no_provider', `pattern detection skipped: ${probe.detail}`);
     }
 
-    const writeRule = await loadPatternWriteRule();
-    if (!writeRule) {
-      return failed(makeError('InternalError', 'NO_ALLOWLIST',
-        'skills/_brain-filing-rules.json missing dream_patterns_path.glob'));
+    // #2781: budget the subagent from the REMAINING parent-job time, not
+    // the fixed config default. Checked after the cheap gates (disabled /
+    // insufficient_evidence / no_provider) so a skip for budget reasons
+    // only fires when the phase would otherwise have submitted.
+    const budgets = clampSubagentBudgets(config, opts.deadlineAtMs, Date.now());
+    if (budgets === null) {
+      return skipped(
+        'insufficient_cycle_budget',
+        `remaining cycle budget under ${Math.round(MIN_PATTERNS_SUBAGENT_BUDGET_MS / 1000)}s ` +
+        `(reserve ${Math.round(CYCLE_DEADLINE_RESERVE_MS / 1000)}s); next cycle retries with a fresh budget`,
+      );
     }
 
     const queue = new MinionQueue(engine);
+    // #2050: children drain inline on a private per-run queue.
+    const childQueueName = `dream-inline-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    ownedPrivateQueue = { queue, name: childQueueName };
+    const privateQueueOwnerToken = randomUUID();
+    const renewPrivateQueueLease = queue.makeThrottledLeaseRenewer(
+      childQueueName, privateQueueOwnerToken, opts.yieldDuringPhase,
+    );
+    const runtimeRunId = opts.runId ?? `patterns:${Date.now()}`;
+    const runtimeIdempotencyKey = `dream:patterns:${runtimeRunId}`;
     const data: SubagentHandlerData = {
-      prompt: buildPatternsPrompt(reflections, config.minEvidence, writeRule),
+      prompt: buildPatternsPrompt(reflections, config.minEvidence, config.sourceSlugPrefix, config.outputSlugPrefix),
       model: config.model,
       max_turns: 30,
-      allowed_slug_prefixes: allowedSlugPrefixesForPatterns(writeRule),
+      // #4217: a patterns child whose every put_page failed must dead-letter.
+      require_writes: true,
+      allowed_slug_prefixes: allowedSlugPrefixes,
+      ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
+      runtime_metadata: {
+        run_id: runtimeRunId,
+        phase: 'patterns',
+        idempotency_key: runtimeIdempotencyKey,
+        write_policy: { mode: 'canonical', allow: allowedSlugPrefixes },
+        ...(opts.deadlineAtMs != null ? { deadline_at_ms: opts.deadlineAtMs } : {}),
+      },
     };
     const submitOpts: Partial<MinionJobInput> = {
+      idempotency_key: runtimeIdempotencyKey,
       max_stalled: 3,
-      timeout_ms: 30 * 60 * 1000,
+      timeout_ms: budgets.timeoutMs,
+      queue: childQueueName,
+      private_queue_owner_job_id: opts.privateQueueOwnerJobId ?? null,
+      private_queue_owner_token: privateQueueOwnerToken,
+      private_queue_lease_ms: DEFAULT_PRIVATE_QUEUE_LEASE_MS,
     };
-    const job = await queue.add('subagent', data as unknown as Record<string, unknown>, submitOpts, {
-      allowProtectedSubmit: true,
-    });
-
-    let outcome: string;
+    let job: Awaited<ReturnType<typeof queue.add>>;
     try {
-      const final = await waitForCompletion(queue, job.id, {
-        timeoutMs: 35 * 60 * 1000,
-        pollMs: 5 * 1000,
+      job = await queue.add('subagent', data as unknown as Record<string, unknown>, submitOpts, {
+        allowProtectedSubmit: true,
       });
+    } catch (e) {
+      // Admission quota (minions.quota_max_waiting.subagent, config-only): a
+      // rejected submit is a recorded phase SKIP, never a phase crash — the
+      // next cycle retries once the backlog drains.
+      if (isQueueQuotaExceededError(e)) {
+        return skipped('admission_quota', e.message);
+      }
+      throw e;
+    }
+    // #4077: cancelled between submit and drain — unwind now; the finally's
+    // reconcilePrivateQueue cancels the just-submitted child.
+    throwIfAborted(opts.signal, '[dream] patterns subagent');
+
+    // Drain this phase's private child queue inline so the parent observes
+    // the terminal state instead of polling waitForCompletion until
+    // subagentWaitTimeoutMs expires. Runs on BOTH engines — on Postgres the
+    // parent job otherwise deadlocks a fully-occupied worker (#2050).
+    await runSubagentsInline(
+      engine, queue, childQueueName, renewPrivateQueueLease,
+      undefined, undefined, 1, null, opts.signal ?? null,
+    );
+
+    let outcome: MinionJobStatus | 'timeout';
+    try {
+      const final = await waitForCompletionRenewing(queue, job.id, {
+        timeoutMs: budgets.waitTimeoutMs,
+        pollMs: 5 * 1000,
+        renew: renewPrivateQueueLease,
+        signal: opts.signal,
+      });
+      // #4077: on abort the wait returns its last snapshot instead of
+      // throwing — unwind before treating it as an outcome.
+      throwIfAborted(opts.signal, '[dream] patterns completion wait');
       outcome = final.status;
     } catch (e) {
-      if (e instanceof TimeoutError) outcome = 'timeout';
-      else throw e;
+      if (e instanceof TimeoutError) {
+        outcome = 'timeout';
+        // The child's own timeout_ms clock starts at ITS claim, not at
+        // submit — a child that sat queued behind other work can outlive
+        // the parent deadline this wait was clamped to. Cancel it so the
+        // subagent can't keep spending/writing after the phase gave up
+        // (waiting child → cancelled immediately; active child → lock
+        // stripped, worker abort fires on next renew tick).
+        try { await queue.cancelJob(job.id); } catch { /* best-effort */ }
+      } else {
+        throw e;
+      }
     }
 
     if (opts.yieldDuringPhase) {
       try { await opts.yieldDuringPhase(); } catch { /* best-effort */ }
     }
 
-    // Collect slugs the subagent wrote (codex finding #2 — query tool exec rows).
-    const writtenSlugs = await collectChildPutPageSlugs(engine, [job.id]);
+    // Collect refs the subagent wrote (codex finding #2 — query tool exec rows).
+    // v0.32.8: refs carry source_id so reverseWriteRefs targets the right
+    // (source, slug) row instead of the first DB match.
+    // #1586: refs carry the cycle's resolved source (children wrote there via
+    // SubagentHandlerData.source_id), so getPage/getTags read the same row the
+    // child wrote, and the reverse-write treats it as the native source.
+    const cycleSourceId = opts.sourceId ?? 'default';
+    // #4077: no post-abort derived-state writes (collection is a read, but
+    // the reverse-write below dual-writes files).
+    throwIfAborted(opts.signal, '[dream] patterns output');
+    const writtenRefs = await collectChildPutPageSlugs(engine, [job.id], cycleSourceId);
 
     // Reverse-write to fs.
-    const reverseWriteCount = await reverseWriteSlugs(engine, opts.brainDir, writtenSlugs);
+    const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal);
 
-    return ok(`${writtenSlugs.length} pattern page(s) written/updated (${outcome})`, {
+    const details = {
       reflections_considered: reflections.length,
-      patterns_written: writtenSlugs.length,
+      patterns_written: writtenRefs.length,
       reverse_write_count: reverseWriteCount,
       child_outcome: outcome,
       job_id: job.id,
-    });
+    };
+
+    // #2782: the phase status must reflect the child outcome. Pre-fix this
+    // returned status:ok even when the subagent timed out (e.g. no
+    // subagent-capable worker slot free for the whole wait window) and zero
+    // pattern pages were written — a silent no-op for days.
+    if (outcome !== 'completed') {
+      if (writtenRefs.length === 0) {
+        return {
+          phase: 'patterns',
+          status: 'fail',
+          duration_ms: 0,
+          summary: `pattern-detection subagent job ${job.id} ended '${outcome}'; nothing was written`,
+          details,
+          error: makeError(
+            outcome === 'timeout' ? 'Timeout' : 'InternalError',
+            `PATTERNS_CHILD_${outcome.toUpperCase()}`,
+            `subagent job ${job.id} outcome '${outcome}' with zero pattern pages written`,
+            outcome === 'timeout'
+              ? 'A timeout with zero writes usually means no subagent-capable worker claimed the job. Check `gbrain jobs list` and worker capacity.'
+              : undefined,
+          ),
+        };
+      }
+      // Partial: the child died/timed out but some pages landed first.
+      return {
+        phase: 'patterns',
+        status: 'warn',
+        duration_ms: 0,
+        summary: `${writtenRefs.length} pattern page(s) written but subagent job ${job.id} ended '${outcome}'`,
+        details,
+      };
+    }
+
+    return ok(`${writtenRefs.length} pattern page(s) written/updated (${outcome})`, details);
   } catch (e) {
     return failed(makeError('InternalError', 'PATTERNS_PHASE_FAIL',
       e instanceof Error ? (e.message || 'patterns phase threw') : String(e)));
   } finally {
+    if (ownedPrivateQueue) {
+      try {
+        const cancelled = await ownedPrivateQueue.queue.reconcilePrivateQueue(
+          ownedPrivateQueue.name,
+          'private queue owner terminalized: patterns phase ended',
+        );
+        if (cancelled.length > 0) {
+          process.stderr.write(
+            `[dream] patterns reconciled ${cancelled.length} non-terminal child job(s) from ${ownedPrivateQueue.name}\n`,
+          );
+        }
+      } catch (cleanupError) {
+        process.stderr.write(
+          `[dream] patterns private-queue cleanup failed for ${ownedPrivateQueue.name}: ` +
+          `${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}\n`,
+        );
+      }
+    }
     void start;
   }
 }
@@ -133,6 +407,55 @@ interface PatternsConfig {
   lookbackDays: number;
   minEvidence: number;
   model: string;
+  /** #2415: shared output namespace (dream.synthesize.output_root, default 'wiki'). */
+  outputRoot: string;
+  /**
+   * Slug prefix `gatherReflections` reads from (SQL `LIKE` scope). Defaults
+   * to `${outputRoot}/personal/reflections`, matching pre-existing behavior.
+   * Config `dream.patterns.source_slug_prefix` overrides it for brains whose
+   * schema has no `personal/reflections/` convention (e.g. a flat
+   * `meetings/` tree) so the phase can read from wherever compiled_truth
+   * excerpts actually live.
+   */
+  sourceSlugPrefix: string;
+  /**
+   * Slug prefix new pattern pages are written under. Defaults to
+   * `${outputRoot}/personal/patterns`, matching pre-existing behavior.
+   * Config `dream.patterns.output_slug_prefix` overrides it.
+   */
+  outputSlugPrefix: string;
+  /** #1594-family: subagent job timeout, config `dream.patterns.subagent_timeout_ms`. */
+  subagentTimeoutMs: number;
+  /** #1594-family: waitForCompletion timeout, config `dream.patterns.subagent_wait_timeout_ms`. */
+  subagentWaitTimeoutMs: number;
+}
+
+const DEFAULT_PATTERNS_SUBAGENT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS = 35 * 60 * 1000;
+
+async function getNumberConfig(engine: BrainEngine, key: string, fallback: number): Promise<number> {
+  const raw = await engine.getConfig(key);
+  if (raw === undefined || raw === null) return fallback;
+  const value = Number(raw);
+  return Number.isNaN(value) ? fallback : value;
+}
+
+/**
+ * Trims leading/trailing slashes from a config-supplied slug prefix. The
+ * downstream dream.write_targets key remains authoritative so upgrading does
+ * not silently move an existing brain back under wiki/.
+ */
+async function getSlugPrefixConfig(
+  engine: BrainEngine,
+  key: string,
+  legacyKey: string,
+  outputRoot: string,
+  fallback: string,
+): Promise<string> {
+  const canonical = await engine.getConfig(legacyKey);
+  const raw = canonical || await engine.getConfig(key);
+  if (!raw) return fallback;
+  return normalizeDreamNamespace(raw, canonical ? legacyKey : key, outputRoot, fallback);
 }
 
 async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> {
@@ -145,13 +468,36 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
   const model = await resolveModel(engine, {
     configKey: 'models.dream.patterns',
     deprecatedConfigKey: 'dream.patterns.model',
+    tier: 'reasoning',
     fallback: 'sonnet',
   });
+  const outputRoot = await loadOutputRoot(engine);
   return {
     enabled,
     lookbackDays: lookbackStr ? Math.max(1, parseInt(lookbackStr, 10) || 30) : 30,
     minEvidence: minEvidenceStr ? Math.max(1, parseInt(minEvidenceStr, 10) || 3) : 3,
     model,
+    outputRoot,
+    sourceSlugPrefix: await getSlugPrefixConfig(
+      engine,
+      'dream.patterns.source_slug_prefix',
+      'dream.write_targets.reflections',
+      outputRoot,
+      `${outputRoot}/personal/reflections`,
+    ),
+    outputSlugPrefix: await getSlugPrefixConfig(
+      engine,
+      'dream.patterns.output_slug_prefix',
+      'dream.write_targets.patterns',
+      outputRoot,
+      `${outputRoot}/personal/patterns`,
+    ),
+    subagentTimeoutMs: await getNumberConfig(
+      engine, 'dream.patterns.subagent_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_TIMEOUT_MS,
+    ),
+    subagentWaitTimeoutMs: await getNumberConfig(
+      engine, 'dream.patterns.subagent_wait_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS,
+    ),
   };
 }
 
@@ -166,36 +512,40 @@ interface ReflectionRef {
 async function gatherReflections(
   engine: BrainEngine,
   lookbackDays: number,
+  sourceSlugPrefix = 'wiki/personal/reflections',
+  sourceId = 'default',
 ): Promise<ReflectionRef[]> {
   const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+  // Reflections live under the configured source slug prefix (bound as a
+  // parameter; see PatternsConfig.sourceSlugPrefix / dream.patterns.source_slug_prefix).
   const rows = await engine.executeRaw<{ slug: string; title: string | null; compiled_truth: string | null }>(
     `SELECT slug, title, compiled_truth
        FROM pages
-      WHERE slug LIKE 'wiki/personal/reflections/%'
+      WHERE slug LIKE $2
+        AND source_id = $3
         AND updated_at >= $1::timestamptz
       ORDER BY updated_at DESC
       LIMIT 100`,
-    [since],
+    [since, `${sourceSlugPrefix}/%`, sourceId],
   );
   return rows.map(r => ({
     slug: r.slug,
     title: r.title ?? r.slug,
-    excerpt: (r.compiled_truth ?? '').slice(0, 600),
+    // A raw UTF-16 slice can split an astral character at the boundary and
+    // leave a lone surrogate. Postgres rejects that when the prompt is bound
+    // into the minion job's JSONB payload. Use the shared safe truncator so a
+    // reflection containing emoji cannot abort the entire patterns phase.
+    excerpt: truncateUtf8(r.compiled_truth ?? '', 600),
   }));
 }
 
 // ── Prompt ────────────────────────────────────────────────────────────
 
-interface PatternWriteRule {
-  glob: string;
-  slugFormat: string;
-  directory: string;
-}
-
 function buildPatternsPrompt(
   reflections: ReflectionRef[],
   minEvidence: number,
-  writeRule: PatternWriteRule,
+  sourceSlugPrefix = 'wiki/personal/reflections',
+  outputSlugPrefix = 'wiki/personal/patterns',
 ): string {
   const today = new Date().toISOString().slice(0, 10);
   const corpus = reflections
@@ -206,15 +556,15 @@ function buildPatternsPrompt(
 
 OUTPUT POLICY
 - Only name a pattern if it appears in at least ${minEvidence} DISTINCT reflections.
-- Each pattern page MUST cite the reflections that constitute its evidence (use [[wiki/personal/reflections/...]] wikilinks).
+- Each pattern page MUST cite the reflections that constitute its evidence (use [[${sourceSlugPrefix}/...]] wikilinks).
 - Use \`search\` to check whether a similar pattern page already exists; if yes, update it (use the same slug). If no, create a new one.
-- Pattern slug format: \`${writeRule.slugFormat}\` (lowercase alphanumeric + hyphens; no underscores, no extension, no date).
+- Pattern slug format: \`${outputSlugPrefix}/<topic-slug>\` (lowercase alphanumeric + hyphens; no underscores, no extension, no date).
 - A "pattern" is a recurring theme, anxiety, decision pattern, relationship dynamic, or self-knowledge motif. NOT a single insight. NOT a list of unrelated topics.
 
 DO NOT WRITE
 - A "patterns from today" digest (that's the dream-cycle-summaries page; not your job).
 - Patterns with <${minEvidence} reflections cited.
-- Anything outside ${writeRule.directory}.
+- Anything outside ${outputSlugPrefix}/.
 
 CONTEXT
 - Today: ${today}
@@ -231,10 +581,14 @@ When done, briefly list the pattern slugs you wrote/updated in your final messag
 async function collectChildPutPageSlugs(
   engine: BrainEngine,
   childIds: number[],
-): Promise<string[]> {
+  sourceId = 'default',
+): Promise<Array<{ slug: string; source_id: string }>> {
   if (childIds.length === 0) return [];
-  // Handle both properly-stored jsonb objects (input->>'slug') and
-  // double-encoded jsonb strings from pre-fix data ((input #>> '{}')::jsonb->>'slug').
+  // v0.32.8: subagent put_page tool schema doesn't expose source_id (subagents
+  // are scoped to a single source). #1586: stamp the cycle's resolved source —
+  // children write there via SubagentHandlerData.source_id — so reverseWriteRefs
+  // can pass it through getPage and pick the correct (source_id, slug) row
+  // instead of whatever the DB happens to return. Unset → legacy 'default'.
   const rows = await engine.executeRaw<{ slug: string }>(
     `SELECT DISTINCT
             COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug
@@ -245,30 +599,51 @@ async function collectChildPutPageSlugs(
       ORDER BY 1`,
     [childIds],
   );
-  return rows.map(r => r.slug).filter((s): s is string => typeof s === 'string' && s.length > 0);
+  return rows
+    .map(r => r.slug)
+    .filter((s): s is string => typeof s === 'string' && s.length > 0)
+    .map(slug => ({ slug, source_id: sourceId }));
 }
 
 // ── Reverse-write ────────────────────────────────────────────────────
 
-async function reverseWriteSlugs(
+import { validateSourceId } from '../utils.ts';
+
+async function reverseWriteRefs(
   engine: BrainEngine,
   brainDir: string,
-  slugs: string[],
+  refs: Array<{ slug: string; source_id: string }>,
+  nativeSourceId = 'default',
+  signal?: AbortSignal,
 ): Promise<number> {
   let count = 0;
-  for (const slug of slugs) {
-    const page = await engine.getPage(slug);
+  for (const { slug, source_id } of refs) {
+    throwIfAborted(signal, '[dream] patterns reverse-write');
+    // v0.32.8 F6: guard against malformed source_id (would let join() break
+    // out of brainDir). validateSourceId throws on `..`, `/`, etc.
+    validateSourceId(source_id);
+    const page = await engine.getPage(slug, { sourceId: source_id });
     if (!page) continue;
-    const tags = await engine.getTags(slug);
+    const tags = await engine.getTags(slug, { sourceId: source_id });
+    // #4077: re-check after the row reads — an abort that lands during
+    // getPage/getTags must not reach this ref's file write.
+    throwIfAborted(signal, '[dream] patterns reverse-write');
     try {
       const md = renderPageToMarkdown(page, tags);
-      const filePath = join(brainDir, `${slug}.md`);
+      // v0.32.8 F6: foreign-source pages land under brainDir/.sources/<id>/<slug>.md
+      // so same-slug-different-source pages don't collide on disk. Pages belonging
+      // to the cycle's own source (#1586: brainDir IS that source's checkout —
+      // legacy 'default' when unscoped) stay at brainDir/<slug>.md so single-source
+      // brains see no change. `.sources/` is a reserved prefix; walkBrainRepo skips dot-dirs.
+      const filePath = source_id === nativeSourceId
+        ? join(brainDir, `${slug}.md`)
+        : join(brainDir, '.sources', source_id, `${slug}.md`);
       mkdirSync(dirname(filePath), { recursive: true });
       writeFileSync(filePath, md, 'utf8');
       count++;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      process.stderr.write(`[dream] reverse-write ${slug} failed: ${msg}\n`);
+      process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${msg}\n`);
     }
   }
   return count;
@@ -281,53 +656,11 @@ function renderPageToMarkdown(page: Page, tags: string[]): string {
     page.compiled_truth ?? '',
     page.timeline ?? '',
     {
-      type: (page.type as PageType) ?? 'note',
+      type: (page.type as string) ?? 'note',
       title: page.title ?? '',
       tags,
     },
   );
-}
-
-// ── Pattern write rule ───────────────────────────────────────────────
-
-async function loadPatternWriteRule(): Promise<PatternWriteRule | null> {
-  const candidates = [
-    join(process.cwd(), 'skills', '_brain-filing-rules.json'),
-    join(__dirname, '..', '..', '..', 'skills', '_brain-filing-rules.json'),
-  ];
-  for (const path of candidates) {
-    if (!existsSync(path)) continue;
-    try {
-      const raw = readFileSync(path, 'utf8');
-      const rule = parsePatternWriteRule(JSON.parse(raw));
-      if (rule) return rule;
-    } catch { /* try next */ }
-  }
-  return null;
-}
-
-function parsePatternWriteRule(parsed: unknown): PatternWriteRule | null {
-  if (!parsed || typeof parsed !== 'object') return null;
-  const raw = (parsed as { dream_patterns_path?: unknown }).dream_patterns_path;
-  if (!raw || typeof raw !== 'object') return null;
-  const cfg = raw as { glob?: unknown; slug_format?: unknown };
-  if (typeof cfg.glob !== 'string' || cfg.glob.length === 0) return null;
-  const slugFormat = typeof cfg.slug_format === 'string' && cfg.slug_format.length > 0
-    ? cfg.slug_format
-    : cfg.glob.replace(/\*$/, '<topic-slug>');
-  return {
-    glob: cfg.glob,
-    slugFormat,
-    directory: directoryFromGlob(cfg.glob),
-  };
-}
-
-function allowedSlugPrefixesForPatterns(rule: PatternWriteRule): string[] {
-  return [rule.glob];
-}
-
-function directoryFromGlob(glob: string): string {
-  return glob.endsWith('/*') ? glob.slice(0, -1) : glob;
 }
 
 // ── Status helpers ───────────────────────────────────────────────────
@@ -361,8 +694,11 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
   return hint ? { class: cls, code, message, hint } : { class: cls, code, message };
 }
 
+// `__testing` re-exports otherwise-private helpers so unit tests can pin the
+// source-scoping contract (#1586) without driving a whole dream cycle.
+// Mirrors synthesize.ts's `__testing` block.
 export const __testing = {
-  buildPatternsPrompt,
-  parsePatternWriteRule,
-  allowedSlugPrefixesForPatterns,
+  gatherReflections,
+  collectChildPutPageSlugs,
+  reverseWriteRefs,
 };

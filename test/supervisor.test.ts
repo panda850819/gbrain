@@ -1,10 +1,13 @@
-import { describe, it, expect, afterEach } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync, mkdirSync, rmSync } from 'fs';
 import { spawn } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { readSupervisorEvents, computeSupervisorAuditFilename } from '../src/core/minions/handlers/supervisor-audit.ts';
-import { calculateBackoffMs } from '../src/core/minions/supervisor.ts';
+import { calculateBackoffMs, resolveHardStopMaxCrashes, MinionSupervisor, type SupervisorEmission } from '../src/core/minions/supervisor.ts';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 
 const TEST_PID_FILE = '/tmp/gbrain-supervisor-test.pid';
 
@@ -58,6 +61,16 @@ function spawnSupervisor(h: IntegrationHarness, overrides: Record<string, string
     SUP_HEALTH_INTERVAL_MS: '999999',   // effectively off
     ...overrides,
   };
+  // issue #1994: the soft crash budget now DEGRADES (retry-with-backoff) rather
+  // than permanently giving up; permanent give-up fires at a much-higher hard
+  // ceiling (maxCrashes × 10). These integration tests assert the give-up
+  // LIFECYCLE (audit events, exit code, pidfile cleanup), so pin the hard
+  // ceiling to the soft budget by default — the degraded path is unit-tested in
+  // child-worker-supervisor.test.ts. Tests that want true degraded behavior
+  // pass GBRAIN_SUPERVISOR_HARD_STOP_CRASHES explicitly.
+  if (env.GBRAIN_SUPERVISOR_HARD_STOP_CRASHES === undefined) {
+    env.GBRAIN_SUPERVISOR_HARD_STOP_CRASHES = env.SUP_MAX_CRASHES;
+  }
 
   const child = spawn('bun', [join(import.meta.dir, 'fixtures/supervisor-runner.ts')], {
     env,
@@ -104,6 +117,31 @@ async function waitFor(pred: () => boolean, timeoutMs: number, tickMs = 20): Pro
 }
 
 describe('MinionSupervisor', () => {
+  describe('resolveHardStopMaxCrashes (issue #1994)', () => {
+    const KEY = 'GBRAIN_SUPERVISOR_HARD_STOP_CRASHES';
+    afterEach(() => { delete process.env[KEY]; });
+
+    it('defaults to maxCrashes × 10 when no override', () => {
+      delete process.env[KEY];
+      expect(resolveHardStopMaxCrashes(10)).toBe(100);
+      expect(resolveHardStopMaxCrashes(3)).toBe(30);
+    });
+
+    it('honors a valid non-negative integer override', () => {
+      process.env[KEY] = '0'; // 0 = disable permanent give-up
+      expect(resolveHardStopMaxCrashes(10)).toBe(0);
+      process.env[KEY] = '5';
+      expect(resolveHardStopMaxCrashes(10)).toBe(5);
+    });
+
+    it('ignores a negative or non-integer override (falls back to default)', () => {
+      process.env[KEY] = '-1';
+      expect(resolveHardStopMaxCrashes(10)).toBe(100);
+      process.env[KEY] = 'abc';
+      expect(resolveHardStopMaxCrashes(10)).toBe(100);
+    });
+  });
+
   describe('calculateBackoffMs', () => {
     it('returns ~1s for first crash', () => {
       const backoff = calculateBackoffMs(0);
@@ -197,6 +235,8 @@ describe('MinionSupervisor', () => {
       // hit max-crashes, then exit via shutdown() with code 1.
       const h = makeHarness('max-crashes', 'exit 1');
       try {
+        // hard ceiling defaults to SUP_MAX_CRASHES in the harness (see
+        // spawnSupervisor) so this give-up lifecycle still fires at 3 (#1994).
         const sup = spawnSupervisor(h, { SUP_MAX_CRASHES: '3' });
         const { code } = await sup.exited;
 
@@ -282,7 +322,12 @@ describe('MinionSupervisor', () => {
       const outFile = join(tmpdir(), `gbrain-sup-env-${process.pid}-${Date.now()}.txt`);
       try { unlinkSync(outFile); } catch { /* may not exist */ }
 
-      const h = makeHarness('env-strip-outfile', `printf '%s\\n' "\${GBRAIN_ALLOW_SHELL_JOBS-UNSET}" > "$OUT_FILE" ; exit 0`);
+      // Worker writes env to OUT_FILE then exits 1. exit=1 is required (not
+      // exit=0) because post-D1/D2 (v0.33) clean exits don't count toward
+      // crashCount — the supervisor would respawn forever. The test's
+      // assertion is on the OUT_FILE contents (env plumbing), not the
+      // exit code, so any non-zero code that trips SUP_MAX_CRASHES=1 works.
+      const h = makeHarness('env-strip-outfile', `printf '%s\\n' "\${GBRAIN_ALLOW_SHELL_JOBS-UNSET}" > "$OUT_FILE" ; exit 1`);
 
       try {
         const sup = spawnSupervisor(h, {
@@ -308,7 +353,9 @@ describe('MinionSupervisor', () => {
       const outFile = join(tmpdir(), `gbrain-sup-env-ok-${process.pid}-${Date.now()}.txt`);
       try { unlinkSync(outFile); } catch { /* may not exist */ }
 
-      const h = makeHarness('env-pass-on-opt-in', `printf '%s\\n' "\${GBRAIN_ALLOW_SHELL_JOBS-UNSET}" > "$OUT_FILE" ; exit 0`);
+      // Worker exits 1 (not 0) so SUP_MAX_CRASHES=1 actually trips. See
+      // the comment on the env-strip test above for the v0.33 rationale.
+      const h = makeHarness('env-pass-on-opt-in', `printf '%s\\n' "\${GBRAIN_ALLOW_SHELL_JOBS-UNSET}" > "$OUT_FILE" ; exit 1`);
 
       try {
         const sup = spawnSupervisor(h, {
@@ -333,7 +380,9 @@ describe('MinionSupervisor', () => {
       const outFile = join(tmpdir(), `gbrain-sup-supervised-${process.pid}-${Date.now()}.txt`);
       try { unlinkSync(outFile); } catch { /* may not exist */ }
 
-      const h = makeHarness('supervised-env', `printf '%s\n' "\${GBRAIN_SUPERVISED-UNSET}" > "$OUT_FILE" ; exit 0`);
+      // exit 1 required post-D1/D2 to trip SUP_MAX_CRASHES=1; clean exits
+      // no longer count toward the crash limit.
+      const h = makeHarness('supervised-env', `printf '%s\n' "\${GBRAIN_SUPERVISED-UNSET}" > "$OUT_FILE" ; exit 1`);
 
       try {
         const sup = spawnSupervisor(h, {
@@ -372,7 +421,11 @@ describe('MinionSupervisor', () => {
     // window before max-crashes fires. We assert the basic completion path
     // and let CI's wall-clock detect any pathological CPU spike.
     it('completes a normal supervise lifecycle with healthInterval=0', async () => {
-      const h = makeHarness('health-interval-zero', 'exit 0');
+      // exit 1 (not exit 0) because post-D1/D2 (v0.33) clean exits don't
+      // count toward max_crashes — a code=0 worker would respawn forever.
+      // The test's purpose is regression coverage that healthInterval=0
+      // disables the timer; the exit code doesn't matter to that assertion.
+      const h = makeHarness('health-interval-zero', 'exit 1');
 
       try {
         const sup = spawnSupervisor(h, {
@@ -401,20 +454,20 @@ describe('MinionSupervisor', () => {
     }, 15_000);
   });
 
-  describe('integration: --max-rss spawn args (v0.21)', () => {
-    it('passes --max-rss 2048 to spawned worker by default', async () => {
+  describe('integration: --max-rss spawn args (v0.21, auto-sized v0.41.39.0)', () => {
+    it('passes an explicit --max-rss through to the spawned worker', async () => {
       const outFile = join(tmpdir(), `gbrain-sup-maxrss-${process.pid}-${Date.now()}.txt`);
       try { unlinkSync(outFile); } catch { /* may not exist */ }
 
-      // Worker logs its argv to OUT_FILE so the test can assert --max-rss 2048
-      // landed there. spawnOnce in supervisor.ts builds:
-      //   ['jobs', 'work', '--concurrency', '1', '--queue', 'default', '--max-rss', '2048']
-      const h = makeHarness('maxrss-default', `printf '%s\\n' "$*" > "$OUT_FILE" ; exit 0`);
+      // SUP_MAX_RSS pins an explicit cap; the supervisor must pass it through
+      // verbatim. exit 1 required post-D1/D2: code=0 workers respawn forever.
+      const h = makeHarness('maxrss-explicit', `printf '%s\\n' "$*" > "$OUT_FILE" ; exit 1`);
 
       try {
         const sup = spawnSupervisor(h, {
           OUT_FILE: outFile,
           SUP_MAX_CRASHES: '1',
+          SUP_MAX_RSS: '2048',
         });
 
         await sup.exited;
@@ -427,6 +480,167 @@ describe('MinionSupervisor', () => {
         h.cleanup();
       }
     }, 15_000);
+
+    // issue #1678: with no explicit cap the supervisor auto-sizes cgroup-aware
+    // instead of the old flat 2048 footgun. Same machine → the in-test
+    // resolveDefaultMaxRssMb() equals what the spawned supervisor computes.
+    it('auto-sizes --max-rss when no explicit cap is given', async () => {
+      const outFile = join(tmpdir(), `gbrain-sup-maxrss-auto-${process.pid}-${Date.now()}.txt`);
+      try { unlinkSync(outFile); } catch { /* may not exist */ }
+
+      const { resolveDefaultMaxRssMb } = await import('../src/core/minions/rss-default.ts');
+      const expected = resolveDefaultMaxRssMb();
+
+      const h = makeHarness('maxrss-auto', `printf '%s\\n' "$*" > "$OUT_FILE" ; exit 1`);
+      try {
+        const sup = spawnSupervisor(h, {
+          OUT_FILE: outFile,
+          SUP_MAX_CRASHES: '1',
+        });
+        await sup.exited;
+
+        expect(existsSync(outFile)).toBe(true);
+        const argv = readFileSync(outFile, 'utf8').trim();
+        expect(argv).toContain(`--max-rss ${expected}`);
+        // Auto-sized value is clamped into the sane range, never the old 2048
+        // unless the box genuinely resolves there.
+        expect(expected).toBeGreaterThanOrEqual(4096);
+        expect(expected).toBeLessThanOrEqual(16384);
+      } finally {
+        try { unlinkSync(outFile); } catch { /* noop */ }
+        h.cleanup();
+      }
+    }, 15_000);
+  });
+
+  // Private-queue startup recovery hook (beforeSpawn seam into
+  // ChildWorkerSupervisor). Constructed in-process with a real/throwing engine
+  // — the hook never spawns anything, so no supervisor-runner fixture needed.
+  describe('reconcileOrphanedPrivateQueuesBeforeWorkerSpawn', () => {
+    let engine: PGLiteEngine;
+    let queue: MinionQueue;
+    let queueSeq = 0;
+
+    beforeAll(async () => {
+      engine = new PGLiteEngine();
+      await engine.connect({ database_url: '' }); // in-memory
+      await engine.initSchema();
+      queue = new MinionQueue(engine);
+    }, 120_000);
+
+    afterAll(async () => {
+      await engine.disconnect();
+    });
+
+    beforeEach(async () => {
+      // Targeted DELETE preserves the `config.version` key MinionQueue's
+      // ensureSchema requires (full resetPgliteState wipes it).
+      await engine.executeRaw('DELETE FROM minion_jobs');
+    });
+
+    function makeSupervisor(eng: BrainEngine, emissions: SupervisorEmission[]): MinionSupervisor {
+      return new MinionSupervisor(eng, {
+        cliPath: '/bin/false', // never spawned — the hook is called directly
+        json: true,
+        onEvent: (e) => emissions.push(e),
+      });
+    }
+
+    /** Orphan fixture: waiting 'subagent' child, terminal owner, aged updated_at. */
+    async function seedOrphanQueue(): Promise<number> {
+      const queueName = `dream-inline-sup-recovery-${++queueSeq}`;
+      const owner = await queue.add('autopilot-cycle', {});
+      await engine.executeRaw(
+        `UPDATE minion_jobs SET status = 'completed', finished_at = now() WHERE id = $1`,
+        [owner.id],
+      );
+      const child = await queue.add(
+        'subagent',
+        { prompt: 'orphan fixture' },
+        {
+          queue: queueName,
+          private_queue_owner_job_id: owner.id,
+          private_queue_owner_token: 'sup-recovery-token',
+          private_queue_lease_ms: 600_000,
+        },
+        { allowProtectedSubmit: true },
+      );
+      await engine.executeRaw(
+        `UPDATE minion_jobs SET updated_at = now() - interval '5 minutes' WHERE id = $1`,
+        [child.id],
+      );
+      return child.id;
+    }
+
+    it("cancels an orphaned queue and emits health_warn reason='private_queue_startup_recovery'", async () => {
+      const childId = await seedOrphanQueue();
+      const emissions: SupervisorEmission[] = [];
+      const sup = makeSupervisor(engine, emissions);
+
+      await (sup as unknown as {
+        reconcileOrphanedPrivateQueuesBeforeWorkerSpawn: () => Promise<void>;
+      }).reconcileOrphanedPrivateQueuesBeforeWorkerSpawn();
+
+      const rows = await engine.executeRaw<{ status: string; error_text: string | null }>(
+        `SELECT status, error_text FROM minion_jobs WHERE id = $1`,
+        [childId],
+      );
+      expect(rows[0]!.status).toBe('cancelled');
+      expect(rows[0]!.error_text).toContain('supervisor startup recovery');
+
+      const warn = emissions.find(
+        (e) => e.event === 'health_warn' &&
+          (e as Record<string, unknown>).reason === 'private_queue_startup_recovery',
+      ) as Record<string, unknown> | undefined;
+      expect(warn).toBeDefined();
+      expect(warn!.cancelled_jobs).toBe(1);
+      expect(warn!.cancelled_queues).toBe(1);
+    });
+
+    it("resolves and emits health_warn reason='private_queue_startup_recovery_failed' when the engine throws", async () => {
+      const throwingEngine = {
+        executeRaw: async () => {
+          throw new Error('injected executeRaw failure');
+        },
+      } as unknown as BrainEngine;
+      const emissions: SupervisorEmission[] = [];
+      const sup = makeSupervisor(throwingEngine, emissions);
+
+      await expect(
+        (sup as unknown as {
+          reconcileOrphanedPrivateQueuesBeforeWorkerSpawn: () => Promise<void>;
+        }).reconcileOrphanedPrivateQueuesBeforeWorkerSpawn(),
+      ).resolves.toBeUndefined();
+
+      const warn = emissions.find(
+        (e) => e.event === 'health_warn' &&
+          (e as Record<string, unknown>).reason === 'private_queue_startup_recovery_failed',
+      ) as Record<string, unknown> | undefined;
+      expect(warn).toBeDefined();
+      expect(String(warn!.error)).toContain('injected executeRaw failure');
+    });
+
+  });
+
+  // Structural (separate suite so the behavioral recovery tests above stay
+  // classified behavioral; binding name is deliberately non-generic so the
+  // classifier's reference heuristic can't leak onto sibling suites).
+  describe('recovery hook timeout bound (structural)', () => {
+    it('the hook bounds recovery in a Promise.race with a 30_000ms timeout', () => {
+      // A hanging DB call here would otherwise block EVERY worker respawn
+      // (the beforeSpawn await is not isStopping-checked mid-flight).
+      const supervisorSource = readFileSync(
+        join(import.meta.dir, '..', 'src', 'core', 'minions', 'supervisor.ts'),
+        'utf8',
+      );
+      const hookStart = supervisorSource.indexOf('reconcileOrphanedPrivateQueuesBeforeWorkerSpawn');
+      expect(hookStart).toBeGreaterThan(-1);
+      const hookEnd = supervisorSource.indexOf('private async shutdown(');
+      expect(hookEnd).toBeGreaterThan(hookStart);
+      const body = supervisorSource.slice(hookStart, hookEnd);
+      expect(body).toContain('Promise.race');
+      expect(body).toContain('30_000');
+    });
   });
 
   describe('integration: audit file rotation + helper', () => {

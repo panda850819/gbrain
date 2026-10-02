@@ -10,6 +10,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { readFileSync } from 'fs';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { __testing } from '../src/core/cycle/patterns.ts';
 
 const patternsSrc = readFileSync(
@@ -19,15 +20,20 @@ const patternsSrc = readFileSync(
 
 describe('patterns phase wiring', () => {
   test('imports queue + waitForCompletion + types', () => {
-    expect(patternsSrc).toContain("import { MinionQueue }");
-    expect(patternsSrc).toContain('waitForCompletion');
+    expect(patternsSrc).toContain("import { DEFAULT_PRIVATE_QUEUE_LEASE_MS, MinionQueue }");
+    // The post-drain wait must be the lease-renewing variant — a plain
+    // waitForCompletion would let the private-queue lease lapse mid-wait.
+    expect(patternsSrc).toContain('waitForCompletionRenewing');
+    // The keepalive must come from the shared throttled factory (T0
+    // extraction) — an inline closure here and in synthesize drifts.
+    expect(patternsSrc).toContain('makeThrottledLeaseRenewer');
     expect(patternsSrc).toContain('SubagentHandlerData');
   });
 
   test('threads allowed_slug_prefixes from filing-rules JSON', () => {
     expect(patternsSrc).toContain('allowed_slug_prefixes');
     expect(patternsSrc).toContain('_brain-filing-rules.json');
-    expect(patternsSrc).toContain('dream_patterns_path');
+    expect(patternsSrc).toContain('dream_synthesize_paths');
   });
 
   test('reads min_evidence + lookback_days config', () => {
@@ -40,9 +46,14 @@ describe('patterns phase wiring', () => {
     expect(patternsSrc).toContain("tool_name = 'brain_put_page'");
   });
 
-  test('skips when ANTHROPIC_API_KEY missing', () => {
-    expect(patternsSrc).toContain('ANTHROPIC_API_KEY');
-    expect(patternsSrc).toContain('no_api_key');
+  test('gates on gateway provider reachability, not ANTHROPIC_API_KEY (PR #2279)', () => {
+    // The gate must probe the RESOLVED patterns model through the gateway
+    // (any configured provider can run patterns), not hardcode the Anthropic
+    // env var — that misclassified non-Anthropic stacks as "no upstream".
+    expect(patternsSrc).toContain('probeChatModel');
+    expect(patternsSrc).toContain('normalizeModelId');
+    expect(patternsSrc).toContain('no_provider');
+    expect(patternsSrc).not.toContain('process.env.ANTHROPIC_API_KEY');
   });
 
   test('skips when reflections below min_evidence', () => {
@@ -69,45 +80,38 @@ describe('patterns phase wiring', () => {
   });
 });
 
-describe('patterns write target source of truth', () => {
-  test('derives prompt slug format and allowed_slug_prefixes from the same rule', () => {
-    const rule = __testing.parsePatternWriteRule({
-      dream_synthesize_paths: {
-        globs: ['wiki/personal/reflections/*', 'wiki/originals/*'],
-      },
-      dream_patterns_path: {
-        glob: 'wiki/personal/patterns/*',
-        slug_format: 'wiki/personal/patterns/<topic-slug>',
-      },
-    });
-
-    expect(rule).not.toBeNull();
-    expect(__testing.allowedSlugPrefixesForPatterns(rule!)).toEqual(['wiki/personal/patterns/*']);
-
-    const prompt = __testing.buildPatternsPrompt([
-      { slug: 'wiki/personal/reflections/one', title: 'One', excerpt: 'alpha' },
-      { slug: 'wiki/personal/reflections/two', title: 'Two', excerpt: 'alpha' },
-      { slug: 'wiki/personal/reflections/three', title: 'Three', excerpt: 'alpha' },
-    ], 3, rule!);
-
-    expect(prompt).toContain('Pattern slug format: `wiki/personal/patterns/<topic-slug>`');
-    expect(prompt).toContain('Anything outside wiki/personal/patterns/.');
-  });
-
-  test('does not fall back to synthesize paths for patterns writes', () => {
-    const rule = __testing.parsePatternWriteRule({
-      dream_synthesize_paths: {
-        globs: ['wiki/personal/reflections/*', 'wiki/originals/*'],
-      },
-    });
-
-    expect(rule).toBeNull();
-  });
-});
-
 describe('patterns scope filter', () => {
-  test('filters reflections by slug LIKE wiki/personal/reflections/%', () => {
-    expect(patternsSrc).toContain("slug LIKE 'wiki/personal/reflections/%'");
+  test('reflection excerpts never split a UTF-16 surrogate pair', async () => {
+    const rocket = '\uD83D\uDE80';
+    const compiledTruth = `${'a'.repeat(599)}${rocket}tail`;
+    const engine = {
+      executeRaw: async () => [{
+        slug: 'wiki/personal/reflections/example',
+        title: 'Example',
+        compiled_truth: compiledTruth,
+      }],
+    } as unknown as BrainEngine;
+
+    const [reflection] = await __testing.gatherReflections(engine, 30);
+
+    expect(reflection.excerpt.isWellFormed()).toBe(true);
+    expect(reflection.excerpt.endsWith(rocket)).toBe(false);
+    expect(reflection.excerpt.length).toBe(599);
+  });
+
+  test('filters reflections by slug LIKE <source_slug_prefix>/%', () => {
+    // #2415 made the top-level namespace root configurable
+    // (dream.synthesize.output_root, default 'wiki'). A later patch made the
+    // full `personal/reflections` sub-path configurable too
+    // (dream.patterns.source_slug_prefix, defaults to
+    // `<output_root>/personal/reflections` so existing behavior is
+    // unchanged) — schemas with no `personal/` nesting (e.g. a flat
+    // `meetings/` tree) can point the phase at their own compiled_truth
+    // source instead.
+    expect(patternsSrc).toContain('slug LIKE $2');
+    expect(patternsSrc).toContain('source_id = $3');
+    expect(patternsSrc).toContain('${sourceSlugPrefix}/%');
+    expect(patternsSrc).toContain('dream.patterns.source_slug_prefix');
   });
 
   test('orders by updated_at DESC for recency-bias', () => {
@@ -116,5 +120,22 @@ describe('patterns scope filter', () => {
 
   test('caps gather to 100 reflections (cost control)', () => {
     expect(patternsSrc).toContain('LIMIT 100');
+  });
+
+  test('output slug prefix is config-driven, defaulting to <output_root>/personal/patterns', () => {
+    expect(patternsSrc).toContain('dream.patterns.output_slug_prefix');
+    expect(patternsSrc).toContain('${outputRoot}/personal/patterns');
+  });
+
+  test('source slug prefix defaults to <output_root>/personal/reflections', () => {
+    expect(patternsSrc).toContain('${outputRoot}/personal/reflections');
+  });
+
+  test('DB output_slug_prefix cannot mint subagent write authority', () => {
+    // Operator-owned filing rules are the authority boundary. DB config may
+    // select an approved prefix, but the phase must reject an unapproved one
+    // rather than append a new allow-list glob.
+    expect(patternsSrc).toContain('WRITE_TARGET_OUTSIDE_ALLOWLIST');
+    expect(patternsSrc).not.toContain('allowedSlugPrefixes.push(outputGlob)');
   });
 });

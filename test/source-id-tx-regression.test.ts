@@ -218,21 +218,38 @@ describe('addLink rewrites the cross-product into a source-qualified JOIN', () =
     expect(rows[0].to_src).toBe('default');
   });
 
-  test('addLink fails fast when the source-qualified endpoint doesn\'t exist', async () => {
+  test('addLink identifies the missing source-qualified endpoint', async () => {
     // Pre-fix: cross-product would silently fall back to the wrong source
-    // pair and succeed. Post-fix: missing-source-row → no JOIN match → no row
-    // inserted → INTERSECT pre-check throws.
-    let err: Error | null = null;
+    // pair and succeed. Post-fix: missing-source-row → endpoint unresolved →
+    // typed per-endpoint miss (#4109) so operation dispatch can classify
+    // mutation-time races without parsing the old ambiguous "A or B" message.
+    let fromErr: Error | null = null;
     try {
       await engine.addLink(
-        FROM_SLUG, TO_SLUG, 'phantom edge', 'documents', 'markdown', undefined, undefined,
-        { fromSourceId: 'nonexistent-src', toSourceId: 'nonexistent-src' },
+        FROM_SLUG, TO_SLUG, 'phantom from edge', 'documents', 'markdown', undefined, undefined,
+        { fromSourceId: 'nonexistent-src', toSourceId: 'default' },
       );
     } catch (e) {
-      err = e as Error;
+      fromErr = e as Error;
     }
-    expect(err).not.toBeNull();
-    expect(err!.message).toMatch(/not found/);
+    expect(fromErr).not.toBeNull();
+    expect(fromErr!.message).toBe(
+      `addLink failed: from page "${FROM_SLUG}" (source=nonexistent-src) not found`,
+    );
+
+    let toErr: Error | null = null;
+    try {
+      await engine.addLink(
+        FROM_SLUG, TO_SLUG, 'phantom to edge', 'documents', 'markdown', undefined, undefined,
+        { fromSourceId: 'default', toSourceId: 'nonexistent-src' },
+      );
+    } catch (e) {
+      toErr = e as Error;
+    }
+    expect(toErr).not.toBeNull();
+    expect(toErr!.message).toBe(
+      `addLink failed: to page "${TO_SLUG}" (source=nonexistent-src) not found`,
+    );
   });
 });
 
@@ -487,6 +504,7 @@ function makeCtx(eng: PGLiteEngine, overrides: Partial<OperationContext> = {}): 
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     dryRun: false,
     remote: false,
+    sourceId: 'default',
     ...overrides,
   };
 }
@@ -584,16 +602,20 @@ describe('v0.31.8 op-handler ctx.sourceId threading', () => {
     expect(rows[0].to_source).toBe('testsrc');
   });
 
-  test('get_links handler scopes to ctx.sourceId; back-compat cross-source view preserved (D16)', async () => {
+  test('get_links handler scopes to ctx.sourceId; default source view (v0.34 STEP 0)', async () => {
     const op = getOp('get_links');
     const scoped = await op.handler(makeCtx(engine, { sourceId: 'testsrc' }), { slug: TAG_SLUG }) as Array<{ to_slug: string }>;
-    const cross  = await op.handler(makeCtx(engine), { slug: TAG_SLUG }) as Array<{ to_slug: string }>;
-    // testsrc has the link from add_link test above. default has none.
+    const defaultCtx = await op.handler(makeCtx(engine), { slug: TAG_SLUG }) as Array<{ to_slug: string }>;
+    // testsrc has the link from add_link test above; the default-source view
+    // has none.
     expect(scoped.length).toBeGreaterThanOrEqual(1);
-    // Cross-source view sees at least the same edges (and would see default's
-    // if we'd seeded any). Under the two-branch back-compat path, this is the
-    // pre-v0.31.8 semantic — no source filter on the engine join.
-    expect(cross.length).toBeGreaterThanOrEqual(scoped.length);
+    // v0.34 STEP 0 (D4): OperationContext.sourceId is REQUIRED. makeCtx with
+    // no override falls back to 'default'. The pre-v0.34 back-compat
+    // "ctx.sourceId undefined → cross-source view" is gone by design —
+    // it's the exact cross-source-bleed bug class STEP 0 closed. Cross-
+    // source visibility is now an explicit caller decision (e.g. a sources
+    // admin running an explicit "all-sources" probe).
+    expect(defaultCtx.length).toBeLessThanOrEqual(scoped.length);
   });
 
   test('delete_page handler scopes to ctx.sourceId (soft-delete only the testsrc row)', async () => {

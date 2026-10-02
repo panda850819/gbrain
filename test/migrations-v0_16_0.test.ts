@@ -54,8 +54,9 @@ describe('v0.16.0 migration', () => {
     ]);
   });
 
-  test('phaseASchema skips on dry-run', () => {
-    const r = __testing.phaseASchema({ dryRun: true, yes: true, noAutopilotInstall: true });
+  test('phaseASchema skips on dry-run', async () => {
+    // v0.41.37.0 #1605: phaseASchema is now async (in-process runMigrateOnlyCore).
+    const r = await __testing.phaseASchema({ dryRun: true, yes: true, noAutopilotInstall: true });
     expect(r.status).toBe('skipped');
     expect(r.detail).toBe('dry-run');
   });
@@ -77,7 +78,7 @@ describe('v0.16.0 migration', () => {
 
 describe('schema-embedded.ts contains subagent tables', () => {
   test('embedded schema references all three subagent tables', async () => {
-    const { SCHEMA_SQL } = await import('../src/core/schema-embedded.ts');
+    const { SCHEMA_SQL } = await import('../src/core/schema-embedded.generated.ts');
     expect(SCHEMA_SQL).toContain('CREATE TABLE IF NOT EXISTS subagent_messages');
     expect(SCHEMA_SQL).toContain('CREATE TABLE IF NOT EXISTS subagent_tool_executions');
     expect(SCHEMA_SQL).toContain('CREATE TABLE IF NOT EXISTS subagent_rate_leases');

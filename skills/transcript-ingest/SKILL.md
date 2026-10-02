@@ -37,7 +37,9 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
 - Capture sessions from all wired sources (Claude Code, Codex, Hermes) with NO
   silent caps: sub-agent sidechains and thin sessions are excluded but counted.
 - Dedup is content-hash based and incremental: re-running never reprocesses an
-  unchanged session; a grown session re-queues automatically.
+  unchanged session. A grown queued session re-queues; a grown done session stays
+  done, preserves verdict/domain/filing metadata, and gains `needs_update` plus
+  `needs_update_from_sha` instead of being re-filed as new.
 - The gate admits ONLY durable, newly-CREATED knowledge — never disposable
   artifacts (dated morning notes, one-off reports) or facts merely injected
   from the brain (novelty floor + durability test).
@@ -59,8 +61,10 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
 1. **Collect** (cheap, python, cron-safe).
    `python3 lib/collect.py`
    Scans every source glob, excludes sidechains, dedups by sha, drops thin
-   sessions (<200 human chars), writes new/grown sessions to `_queue/<key>.txt`
-   and refreshes `_manifest.json` (all pending, ranked by human chars).
+   sessions (<200 human chars), writes new/grown queued sessions to `_queue/<key>.txt`
+   and refreshes `_manifest.json` (queued-only, ranked by human chars). Grown done
+   sessions retain their classification, are flagged for update, and have stale
+   queue files removed; drain never selects them as new work.
 
 2. **Distill batch** (LLM, free subagents — Mode A).
    `python3 lib/distill_batch.py [N]` emits a JSON spec of the next N pending
@@ -117,7 +121,7 @@ Turn the firehose of AI agent conversations into curated brain knowledge.
 - `prompts/gate_prompt.md` — signal/noise + domain + novelty + durability
 - `prompts/distill_prompt.md` — per-session gate+distill worker
 - Agent (in-harness subagents) for gate + distill
-- `gbrain put_page` / `capture` only at the manual filing step
+- `gbrain put` / `capture` only at the manual filing step
 
 ## Not Yet Wired
 

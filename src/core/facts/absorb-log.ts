@@ -18,6 +18,9 @@
  *   - 'queue_shutdown'  — queue rejected the enqueue because shutdown is in progress.
  *   - 'embed_failure'   — gateway down on embedOne; row inserts with NULL embedding.
  *   - 'pipeline_error'  — anything else absorbed inside runFactsBackstop's catch.
+ *   - 'gateway_auth'    — provider authentication/authorization failed.
+ *   - 'gateway_billing' — provider credit, quota, or billing hard limit failed.
+ *   - 'gateway_rate_limit' — provider rate limit; retry policy remains with the caller.
  *   - eligibility_skip is intentionally NOT logged (high cardinality, low signal).
  *
  * The writer is best-effort — a failure to log SHOULDN'T blow up the
@@ -26,6 +29,8 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { classifyGlobalLlmError } from '../ai/errors.ts';
+import { GBrainError } from '../types.ts';
 
 export const FACTS_ABSORB_REASONS = [
   'gateway_error',
@@ -34,7 +39,32 @@ export const FACTS_ABSORB_REASONS = [
   'queue_shutdown',
   'embed_failure',
   'pipeline_error',
+  // Extraction-outcome codes (keyed-but-failing states; keyless-expected
+  // states deliberately write NO row — see backstop.ts
+  // surfaceExtractionFailure). Doctor's facts_extraction_health groups by
+  // split_part(summary,':',1), so new codes surface with zero schema change.
+  'chat_unavailable',
+  'refusal',
+  'content_filter',
+  'malformed_output',
+  'non_terminal_stop',
+  'truncated_output',
+  'gateway_auth',
+  'gateway_billing',
+  'gateway_rate_limit',
 ] as const;
+
+// v0.39.3.0 WARN-4 + CV13 — module-scoped flag so the first-occurrence
+// diagnostic log fires ONCE per process. Subsequent occurrences of the
+// same 'No database connection' class are suppressed (keeps captures
+// quiet) but the first one prints enough context to triage why the
+// facts subsystem is calling logIngest on a disconnected engine.
+// Exported as a test seam so the assertion can reset between runs.
+let _hasLoggedDisconnectedFactsAbsorb = false;
+/** @internal — test seam */
+export function _resetFactsAbsorbDisconnectedFlagForTests(): void {
+  _hasLoggedDisconnectedFactsAbsorb = false;
+}
 
 export type FactsAbsorbReason = typeof FACTS_ABSORB_REASONS[number];
 
@@ -69,13 +99,61 @@ export async function writeFactsAbsorbLog(
       summary: `${reason}: ${cleanedDetail}`,
     });
   } catch (e) {
-    // Don't let logging failures cascade. The whole point of D5 is
-    // observability — but observability can't break the runtime path.
+    // v0.39.3.0 WARN-4 + CQ1 — typed access via instanceof + .problem field
+    // (NOT string-match on e.message). The 'No database connection' class
+    // fires after every `gbrain capture` invocation because the facts
+    // subsystem opens its own engine handle that isn't connected in the
+    // CLI capture path. Per-capture noise is suppressed; CV13 prints
+    // ONE first-occurrence stack trace so the next user reporting it
+    // gives us the call site to fix in v0.38.4.
+    if (e instanceof GBrainError && e.problem === 'No database connection') {
+      if (!_hasLoggedDisconnectedFactsAbsorb) {
+        _hasLoggedDisconnectedFactsAbsorb = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[facts:absorb] suppressed: 'No database connection' fires on a separate engine handle ` +
+          `(known WARN-4 in v0.38; subsequent occurrences silent this process). ` +
+          `First-occurrence trace for v0.38.4 diagnosis:\n${e.stack ?? '<no stack>'}`,
+        );
+      }
+      // Subsequent occurrences silent — the page write itself succeeded;
+      // the facts:absorb log is a courtesy that the doctor health check
+      // reads. A connection-bound log site already filed the v0.38.4 TODO
+      // (see TODOS.md).
+      return;
+    }
+    // All other failures keep the loud warn. Don't let logging failures
+    // cascade — observability can't break the runtime path — but DO let
+    // the operator see real subsystem errors (PgBouncer crash, schema
+    // drift, etc.) instead of suppressing them globally.
     // eslint-disable-next-line no-console
     console.warn(
       `[facts:absorb] failed to log ${reason} for ${ref}: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
+}
+
+/**
+ * Persist a provider failure without copying provider response bodies, keys,
+ * or request payloads into ingest_log. Global failures get stable typed
+ * reason codes; all other failures retain the existing classifier.
+ */
+export async function writeFactsAbsorbFailure(
+  engine: BrainEngine,
+  ref: string,
+  err: unknown,
+  sourceId: string = 'default',
+): Promise<void> {
+  const globalClass = classifyGlobalLlmError(err);
+  const reason: FactsAbsorbReason = globalClass === 'auth'
+    ? 'gateway_auth'
+    : globalClass === 'billing'
+      ? 'gateway_billing'
+      : globalClass === 'rate_limit'
+        ? 'gateway_rate_limit'
+        : classifyFactsAbsorbError(err);
+  const errorType = err instanceof Error && err.name ? err.name : 'Error';
+  await writeFactsAbsorbLog(engine, ref, reason, `provider request failed (${errorType})`, sourceId);
 }
 
 /**
@@ -88,6 +166,20 @@ export function classifyFactsAbsorbError(err: unknown): FactsAbsorbReason {
   if (!err) return 'pipeline_error';
   const msg = err instanceof Error ? err.message : String(err);
   const name = err instanceof Error ? err.name : '';
+
+  // Typed extraction failures carry their reason — map precisely instead of
+  // pattern-matching the message (a 401/invalid-model provider_error would
+  // otherwise fall through to the generic 'pipeline_error'). instanceof via
+  // name check: the class lives in extract.ts and this module must stay
+  // import-light; the name is stable and set in the constructor.
+  if (name === 'FactsExtractionError') {
+    const reason = (err as { reason?: string }).reason;
+    if (reason === 'provider_error') return 'gateway_error';
+    if (reason && (FACTS_ABSORB_REASONS as readonly string[]).includes(reason)) {
+      return reason as FactsAbsorbReason;
+    }
+    return 'pipeline_error';
+  }
 
   // Anthropic / OpenAI / Voyage all surface 4xx/5xx + timeouts in similar shapes.
   if (/timeout|timed?\s?out|ETIMEDOUT/i.test(msg)) return 'gateway_error';

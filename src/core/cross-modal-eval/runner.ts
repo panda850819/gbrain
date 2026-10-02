@@ -22,6 +22,7 @@ import type { AggregateResult, SlotResult } from './aggregate.ts';
 import { parseModelJSON } from './json-repair.ts';
 import { receiptName, sha8 } from './receipt-name.ts';
 import { writeReceipt } from './receipt-write.ts';
+import { canonicalLookup } from '../model-pricing.ts';
 
 export const RECEIPT_SCHEMA_VERSION = 1;
 
@@ -43,9 +44,18 @@ export const DEFAULT_DIMENSIONS: string[] = [
  * `--slot-a-model`, `--slot-b-model`, `--slot-c-model` on the CLI.
  */
 export const DEFAULT_SLOTS: SlotConfig[] = [
-  { id: 'A', model: 'openai:gpt-4o' },
+  // Every default MUST be listed in its recipe's chat touchpoint (pinned by
+  // test/cross-modal-default-slots.test.ts) — `openai:gpt-4o` sat here after
+  // the OpenAI recipe dropped it, so slot A errored "not listed for OpenAI
+  // chat" on every install and the 3-slot panel could never reach its
+  // 2-model quorum without a Google key (verdict: permanently inconclusive).
+  { id: 'A', model: 'openai:gpt-5.2' },
   { id: 'B', model: 'anthropic:claude-opus-4-7' },
-  { id: 'C', model: 'google:gemini-1.5-pro' },
+  // gemini-1.5-pro was retired by Google (#3510), so slot C failed even with
+  // a Google key configured. deepseek:deepseek-v4-pro preserves the
+  // three-distinct-provider contract with a model registered in both the
+  // recipe and canonical pricing tables (same replacement as PR #3501).
+  { id: 'C', model: 'deepseek:deepseek-v4-pro' },
 ];
 
 export interface SlotConfig {
@@ -254,8 +264,26 @@ async function callSlot(
   }
 }
 
-function buildPrompt(task: string, dimensions: string[], output: string): string {
+/**
+ * The JSON key a judge must use for a dimension: the label before the
+ * ` — ` separator (whole trimmed string when a custom dimension has none).
+ * Exported for the prompt-pinning test.
+ */
+export function dimensionScoreKey(dimension: string): string {
+  return dimension.split('—')[0].trim();
+}
+
+/** Exported for the judge-key pinning test only. */
+export function buildPrompt(task: string, dimensions: string[], output: string): string {
   const dimList = dimensions.map((d, i) => `${i + 1}. ${d}`).join('\n');
+  // Root-cause fix for cross-model dimension splits (#3491, the #4338
+  // approach): pin the exact "scores" keys instead of the old "dim_1_name"
+  // placeholder that let each judge invent its own spelling/casing.
+  // aggregate.ts's trim+lowercase normalization stays as the deterministic
+  // backstop for judges that ignore the pinning.
+  const scoreKeys = dimensions
+    .map((d) => `    ${JSON.stringify(dimensionScoreKey(d))}: { "score": N, "feedback": "..." },`)
+    .join('\n');
   return [
     'You are a strict quality evaluator. Given a TASK and an OUTPUT, evaluate whether the output achieves the task goals.',
     '',
@@ -274,11 +302,10 @@ function buildPrompt(task: string, dimensions: string[], output: string): string
     '',
     'Then list exactly 10 specific, actionable improvements — concrete changes with examples, prioritized by impact.',
     '',
-    'Respond in JSON only (no markdown fences):',
+    'Respond in JSON only (no markdown fences), using EXACTLY these keys under "scores":',
     '{',
     '  "scores": {',
-    '    "dim_1_name": { "score": N, "feedback": "..." },',
-    '    ...',
+    scoreKeys,
     '  },',
     '  "overall": N,',
     '  "improvements": ["1. ...", "2. ...", ... "10. ..."]',
@@ -320,28 +347,24 @@ export interface CostEstimate {
 export function estimateCost(slots: SlotConfig[], cycles: number, maxTokens: number): CostEstimate {
   // Per-call cost = (input_tokens × input_price + output_tokens × output_price) / 1e6.
   // Without knowing prompt size, estimate input ~5k tokens (a SKILL.md + scoring rubric).
+  //
+  // All prices (anthropic + openai + google + together + deepseek) come from the
+  // canonical table via canonicalLookup (src/core/model-pricing.ts) — single
+  // source of truth. This finishes the de-duplication the v0.31.12 plan started
+  // for Anthropic; OpenAI/Google/Together/DeepSeek panel models no longer carry
+  // inline rates here. Slots with no canonical entry fall to the "no pricing on
+  // file" note (cost estimate may be low), preserving prior behavior.
   const ESTIMATED_INPUT_TOKENS = 5000;
-  const PRICING: Record<string, { in: number; out: number } | undefined> = {
-    'openai:gpt-4o': { in: 2.5, out: 10.0 },
-    'openai:gpt-4o-mini': { in: 0.15, out: 0.6 },
-    'anthropic:claude-opus-4-7': { in: 15.0, out: 75.0 },
-    'anthropic:claude-sonnet-4-6-20250929': { in: 3.0, out: 15.0 },
-    'anthropic:claude-haiku-4-5-20251001': { in: 0.25, out: 1.25 },
-    'google:gemini-1.5-pro': { in: 1.25, out: 5.0 },
-    'google:gemini-2.0-flash': { in: 0.1, out: 0.4 },
-    'together:meta-llama/Llama-3.3-70B-Instruct-Turbo': { in: 0.88, out: 0.88 },
-    'deepseek:deepseek-chat': { in: 0.14, out: 0.28 },
-  };
 
   const notes: string[] = [];
   let perCycle = 0;
   for (const slot of slots) {
-    const p = PRICING[slot.model];
+    const p = canonicalLookup(slot.model);
     if (!p) {
       notes.push(`(${slot.model}): no pricing on file; cost estimate may be low`);
       continue;
     }
-    const cost = (ESTIMATED_INPUT_TOKENS * p.in + maxTokens * p.out) / 1_000_000;
+    const cost = (ESTIMATED_INPUT_TOKENS * p.input + maxTokens * p.output) / 1_000_000;
     perCycle += cost;
   }
   return {

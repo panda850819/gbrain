@@ -5,6 +5,7 @@ import {
   ALLOWED_SCOPES,
   ALLOWED_SCOPES_LIST,
   assertAllowedScopes,
+  filterAllowedScopes,
   InvalidScopeError,
   parseScopeString,
   type Scope,
@@ -129,17 +130,19 @@ describe('F3 refresh-token subset semantics under hasScope', () => {
 // ---------------------------------------------------------------------------
 
 describe('ALLOWED_SCOPES — exact list pinned', () => {
-  test('contains the 5 canonical scopes', () => {
-    expect(ALLOWED_SCOPES.size).toBe(5);
+  test('contains the 6 canonical scopes (v0.38: agent added)', () => {
+    expect(ALLOWED_SCOPES.size).toBe(6);
     expect(ALLOWED_SCOPES.has('read')).toBe(true);
     expect(ALLOWED_SCOPES.has('write')).toBe(true);
     expect(ALLOWED_SCOPES.has('admin')).toBe(true);
     expect(ALLOWED_SCOPES.has('sources_admin')).toBe(true);
     expect(ALLOWED_SCOPES.has('users_admin')).toBe(true);
+    expect(ALLOWED_SCOPES.has('agent')).toBe(true);
   });
   test('list is sorted alphabetically (deterministic for wire/drift check)', () => {
     expect([...ALLOWED_SCOPES_LIST]).toEqual([
       'admin',
+      'agent',
       'read',
       'sources_admin',
       'users_admin',
@@ -185,6 +188,24 @@ describe('assertAllowedScopes', () => {
     } catch (e) {
       expect((e as InvalidScopeError).invalidScope).toBe('flying-unicorn');
     }
+  });
+});
+
+describe('filterAllowedScopes', () => {
+  test('keeps allowed and reports dropped unknowns', () => {
+    const { allowed, dropped } = filterAllowedScopes([
+      'read', 'offline_access', 'write', 'openid', 'read',
+    ]);
+    expect(allowed).toEqual(['read', 'write']);
+    expect(dropped).toEqual(['offline_access', 'openid']);
+  });
+  test('all-unknown yields empty allowed', () => {
+    const { allowed, dropped } = filterAllowedScopes(['openid', 'offline_access']);
+    expect(allowed).toEqual([]);
+    expect(dropped).toEqual(['openid', 'offline_access']);
+  });
+  test('empty input yields empty both', () => {
+    expect(filterAllowedScopes([])).toEqual({ allowed: [], dropped: [] });
   });
 });
 
