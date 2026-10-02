@@ -4,14 +4,20 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import {
   GIT_SSRF_FLAGS,
+  GIT_SSRF_SUBCOMMAND_FLAGS,
   parseRemoteUrl,
   RemoteUrlError,
   cloneRepo,
   pullRepo,
+  fetchRemote,
   GitOperationError,
   validateRepoState,
+  buildGitEnv,
+  GIT_ENV,
 } from '../src/core/git-remote.ts';
+import { execFileSync } from 'child_process';
 import { withEnv } from './helpers/with-env.ts';
+import { gitStderrLeads } from './helpers/git-stderr-probe.ts';
 
 // ---------------------------------------------------------------------------
 // Fake-git harness: write a shell script that records its argv to a log file,
@@ -81,11 +87,22 @@ const fakePath = (): string => `${FAKE_GIT_DIR}:${process.env.PATH ?? ''}`;
 // ---------------------------------------------------------------------------
 
 describe('GIT_SSRF_FLAGS', () => {
-  test('exact shape — codex SSRF lockdown', () => {
+  test('exact shape — global -c config flags only (spread BEFORE the verb)', () => {
     expect([...GIT_SSRF_FLAGS]).toEqual([
       '-c', 'http.followRedirects=false',
       '-c', 'protocol.file.allow=never',
       '-c', 'protocol.ext.allow=never',
+    ]);
+  });
+});
+
+describe('GIT_SSRF_SUBCOMMAND_FLAGS', () => {
+  test('exact shape — subcommand-level flags only (spread AFTER the verb)', () => {
+    // v0.34 fix wave: --no-recurse-submodules is a clone/pull subcommand
+    // flag, not a global flag. Real git exits 129 with "unknown option"
+    // when it appears before the verb. The pre-v0.34 single-constant
+    // spread baked the bug in.
+    expect([...GIT_SSRF_SUBCOMMAND_FLAGS]).toEqual([
       '--no-recurse-submodules',
     ]);
   });
@@ -229,12 +246,22 @@ describe('cloneRepo', () => {
     const calls = readArgvLog();
     expect(calls.length).toBe(1);
     const argv = calls[0];
-    // Pin the SSRF flags before the 'clone' verb (codex Q2 invariant).
+    // Global -c config flags must appear BEFORE the 'clone' verb.
     expect(argv.slice(0, GIT_SSRF_FLAGS.length)).toEqual([...GIT_SSRF_FLAGS]);
     expect(argv).toContain('clone');
     expect(argv).toContain('--depth=1');
     expect(argv).toContain('https://example.com/repo');
     expect(argv[argv.length - 1]).toBe(dest);
+    // v0.34 fix wave: subcommand flags MUST appear after the verb. Real
+    // git rejects `git --no-recurse-submodules clone ...` with exit 129.
+    // The fake-git harness returned 0 for any argv shape, so this
+    // position-anchored assertion is the structural regression test.
+    const cloneIdx = argv.indexOf('clone');
+    expect(cloneIdx).toBeGreaterThan(-1);
+    for (const subFlag of GIT_SSRF_SUBCOMMAND_FLAGS) {
+      const flagIdx = argv.indexOf(subFlag);
+      expect(flagIdx).toBeGreaterThan(cloneIdx);
+    }
   });
 
   test('depth=0 means no --depth flag (full clone)', async () => {
@@ -309,6 +336,13 @@ describe('pullRepo', () => {
     expect(argv.slice(2, 2 + GIT_SSRF_FLAGS.length)).toEqual([...GIT_SSRF_FLAGS]);
     expect(argv).toContain('pull');
     expect(argv).toContain('--ff-only');
+    // v0.34 fix wave: subcommand flag position assertion.
+    const pullIdx = argv.indexOf('pull');
+    expect(pullIdx).toBeGreaterThan(-1);
+    for (const subFlag of GIT_SSRF_SUBCOMMAND_FLAGS) {
+      const flagIdx = argv.indexOf(subFlag);
+      expect(flagIdx).toBeGreaterThan(pullIdx);
+    }
     rmSync(repo, { recursive: true, force: true });
   });
 
@@ -385,5 +419,108 @@ describe('validateRepoState', () => {
     await withEnv({ PATH: fakePath() }, async () => {
       expect(validateRepoState(p)).toBe('healthy');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #1315 — stderr-first git errors + platform-aware no-prompt env.
+//
+// (a) GitOperationError used to wrap Node's execFileSync envelope
+//     ("Command failed: git -C <path> -c http.followRedirects=false …"),
+//     so every downstream `.slice(0, N)` (sync's warn lines) cut the message
+//     off BEFORE the real `fatal: …` stderr. The wrapper now leads with the
+//     captured stderr.
+// (b) GIT_ENV hardcoded the POSIX-only `/bin/false` askpass, which on Windows
+//     makes git fail with a confusing "could not run askpass" instead of
+//     failing auth cleanly. buildGitEnv(platform) is pure so the win32 shape
+//     is testable on POSIX CI.
+// ---------------------------------------------------------------------------
+
+describe('#1315 — buildGitEnv platform shapes', () => {
+  test('POSIX keeps the /bin/false askpass confinement (unchanged)', () => {
+    for (const platform of ['linux', 'darwin'] as const) {
+      const env = buildGitEnv(platform);
+      expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+      expect(env.GCM_INTERACTIVE).toBe('never');
+      expect(env.GIT_ASKPASS).toBe('/bin/false');
+      expect(env.SSH_ASKPASS).toBe('/bin/false');
+      expect(env.SSH_ASKPASS_REQUIRE).toBeUndefined();
+    }
+  });
+
+  test('win32 drops the POSIX-only /bin/false and forbids ssh askpass instead', () => {
+    const env = buildGitEnv('win32');
+    expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+    expect(env.GCM_INTERACTIVE).toBe('never');
+    expect(env.GIT_ASKPASS).toBeUndefined();
+    expect(env.SSH_ASKPASS).toBeUndefined();
+    expect(env.SSH_ASKPASS_REQUIRE).toBe('never');
+  });
+
+  test('GIT_ENV is the current-platform build', () => {
+    expect(GIT_ENV).toEqual(buildGitEnv());
+  });
+});
+
+describe('#1315 — stderr-first GitOperationError (real git, file-origin repo)', () => {
+  const SANDBOX = join(tmpdir(), `gbrain-1315-stderr-${process.pid}`);
+
+  beforeAll(() => {
+    rmSync(SANDBOX, { recursive: true, force: true });
+    mkdirSync(SANDBOX, { recursive: true });
+  });
+  afterAll(() => {
+    rmSync(SANDBOX, { recursive: true, force: true });
+  });
+
+  /** Upstream repo + a mirror cloned via plain git (origin = local file path),
+   *  so pullRepo/fetchRemote deterministically fail on protocol.file.allow=never. */
+  function mkFileOriginMirror(): string {
+    const upstream = join(SANDBOX, `upstream-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(upstream, { recursive: true });
+    writeFileSync(join(upstream, 'a.md'), '# a');
+    execFileSync('git', ['-C', upstream, 'init', '-q']);
+    execFileSync('git', ['-C', upstream, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', upstream, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', upstream, 'add', '-A']);
+    execFileSync('git', ['-C', upstream, 'commit', '-q', '-m', 'initial']);
+    const mirror = `${upstream}-mirror`;
+    execFileSync('git', ['clone', '-q', upstream, mirror]);
+    return mirror;
+  }
+
+  // skipIf: pins "git's own fatal: appears within the first 200 chars" —
+  // unrunnable behind an ambient git PATH shim that prints its own stderr
+  // first (e.g. Conductor's auth-broker wrapper). See helpers/git-stderr-probe.
+  test.skipIf(!gitStderrLeads())('pullRepo message leads with the real git stderr, not the Command-failed envelope', () => {
+    const mirror = mkFileOriginMirror();
+    let threw: GitOperationError | undefined;
+    try {
+      pullRepo(mirror);
+    } catch (e) {
+      threw = e as GitOperationError;
+    }
+    expect(threw).toBeInstanceOf(GitOperationError);
+    const msg = threw!.message;
+    expect(msg).toContain('git pull failed in');
+    // The real git error must survive a downstream 200-char warn slice.
+    expect(msg.slice(0, 200)).toMatch(/fatal:/);
+    // The Node envelope (full argv echo) must NOT be the message body.
+    expect(msg).not.toContain('Command failed');
+    // Cause preserved for timeout/code inspection (sync.ts reads .cause).
+    expect(threw!.cause).toBeDefined();
+  });
+
+  test.skipIf(!gitStderrLeads())('fetchRemote message is stderr-first too', () => {
+    const mirror = mkFileOriginMirror();
+    let threw: GitOperationError | undefined;
+    try {
+      fetchRemote(mirror, 'master');
+    } catch (e) {
+      threw = e as GitOperationError;
+    }
+    expect(threw).toBeInstanceOf(GitOperationError);
+    expect(threw!.message.slice(0, 200)).toMatch(/fatal:/);
+    expect(threw!.message).not.toContain('Command failed');
   });
 });

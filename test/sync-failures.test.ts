@@ -18,29 +18,34 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { doctorSource } from './helpers/doctor-source.ts';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
-// Point GBRAIN_HOME at a tmpdir so we don't stomp the real ~/.gbrain/sync-failures.jsonl
+// Isolate the ledger directly: GBRAIN_HOME and the suite preload can override HOME.
 let tmpHome: string;
-const originalGbrainHome = process.env.GBRAIN_HOME;
+const originalFailuresDir = process.env.GBRAIN_SYNC_FAILURES_DIR;
 
 beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-sync-failures-'));
-  process.env.GBRAIN_HOME = tmpHome;
+  process.env.GBRAIN_SYNC_FAILURES_DIR = tmpHome;
   // Belt-and-suspenders: explicitly clear the jsonl at the resolved path.
   const { syncFailuresPath } = await import('../src/core/sync.ts');
   try { rmSync(syncFailuresPath(), { force: true }); } catch { /* none */ }
 });
 
 afterEach(() => {
-  if (originalGbrainHome !== undefined) process.env.GBRAIN_HOME = originalGbrainHome;
-  else delete process.env.GBRAIN_HOME;
+  if (originalFailuresDir !== undefined) process.env.GBRAIN_SYNC_FAILURES_DIR = originalFailuresDir;
+  else delete process.env.GBRAIN_SYNC_FAILURES_DIR;
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 describe('Bug 9 — sync-failures JSONL helpers', () => {
-  test('recordSyncFailures appends one line per failure with dedup', async () => {
+  // issue #1939: recordSyncFailures now upserts by (source_id, path) and
+  // increments `attempts` (consecutive failed runs) instead of appending a row
+  // per (path, commit, error). One row per failing path; the attempt counter
+  // drives the bounded auto-skip valve.
+  test('recordSyncFailures upserts per path, incrementing attempts', async () => {
     const { recordSyncFailures, loadSyncFailures, syncFailuresPath } = await import('../src/core/sync.ts');
 
     recordSyncFailures([
@@ -51,21 +56,28 @@ describe('Bug 9 — sync-failures JSONL helpers', () => {
     expect(existsSync(syncFailuresPath())).toBe(true);
     const entries = loadSyncFailures();
     expect(entries.length).toBe(2);
-    expect(entries[0].path).toBe('people/alice.md');
-    expect(entries[0].commit).toBe('abc123def456');
-    expect(entries[0].acknowledged).toBeUndefined();
+    const alice = entries.find(e => e.path === 'people/alice.md')!;
+    expect(alice.commit).toBe('abc123def456');
+    expect(alice.state).toBe('open');
+    expect(alice.attempts).toBe(1);
+    expect(alice.acknowledged).toBe(false);
 
-    // Same failure on same commit should NOT re-append.
+    // Same path again (same commit) → still ONE row, attempts climbs.
     recordSyncFailures([
       { path: 'people/alice.md', error: 'YAML: unexpected colon in title' },
     ], 'abc123def456');
     expect(loadSyncFailures().length).toBe(2);
+    expect(loadSyncFailures().find(e => e.path === 'people/alice.md')!.attempts).toBe(2);
 
-    // Different commit → new entry.
+    // Different commit → still upserted (not appended), attempts keeps climbing.
     recordSyncFailures([
       { path: 'people/alice.md', error: 'YAML: unexpected colon in title' },
     ], 'zzz999');
-    expect(loadSyncFailures().length).toBe(3);
+    const after = loadSyncFailures();
+    expect(after.length).toBe(2);
+    const alice2 = after.find(e => e.path === 'people/alice.md')!;
+    expect(alice2.attempts).toBe(3);
+    expect(alice2.commit).toBe('zzz999');
   });
 
   test('acknowledgeSyncFailures marks unacked entries, leaves acked alone', async () => {
@@ -106,87 +118,62 @@ describe('Bug 9 — sync-failures JSONL helpers', () => {
   });
 
   test('resolveMissingSyncFailures marks deleted failed files resolved', async () => {
-    const {
-      recordSyncFailures,
-      resolveMissingSyncFailures,
-      unresolvedSyncFailures,
-      loadSyncFailures,
-    } = await import('../src/core/sync.ts');
+    const { recordFailures, resolveMissingSyncFailures, unresolvedSyncFailures, loadSyncFailures } =
+      await import('../src/core/sync.ts');
     const repoPath = join(tmpHome, 'repo');
     mkdirSync(join(repoPath, 'notes'), { recursive: true });
     writeFileSync(join(repoPath, 'notes', 'still-bad.md'), '---\nslug: still-bad\n---\n');
 
-    recordSyncFailures([
+    recordFailures('source-a', [
       { path: 'notes/bad.md', error: 'Frontmatter slug "bad" does not match path-derived slug "notes/bad"' },
       { path: 'notes/still-bad.md', error: 'YAML parse failed: bad colon' },
-    ], 'commit1', repoPath);
+    ], 'commit1');
 
-    const result = resolveMissingSyncFailures(repoPath);
+    const result = resolveMissingSyncFailures(repoPath, { sourceId: 'source-a' });
     expect(result.count).toBe(1);
     expect(result.summary).toEqual([{ code: 'SLUG_MISMATCH', count: 1 }]);
-
     const unresolved = unresolvedSyncFailures();
     expect(unresolved).toHaveLength(1);
     expect(unresolved[0].path).toBe('notes/still-bad.md');
-
     const resolved = loadSyncFailures().find(f => f.path === 'notes/bad.md');
-    expect(resolved?.resolved).toBe(true);
+    expect(resolved?.state).toBe('acknowledged');
     expect(resolved?.resolution).toBe('missing_file');
     expect(typeof resolved?.resolved_at).toBe('string');
   });
 
   test('resolveMissingSyncFailures never clears another source\'s records', async () => {
-    const { recordSyncFailures, resolveMissingSyncFailures, unresolvedSyncFailures } =
+    const { recordFailures, resolveMissingSyncFailures, unresolvedSyncFailures } =
       await import('../src/core/sync.ts');
     const repoA = join(tmpHome, 'repo-a');
     const repoB = join(tmpHome, 'repo-b');
     mkdirSync(repoA, { recursive: true });
     mkdirSync(repoB, { recursive: true });
-
-    // Recorded against repo B; the file is genuinely missing from BOTH trees.
-    recordSyncFailures([{ path: 'notes/only-in-b.md', error: 'YAML parse failed' }], 'c1', repoB);
-
-    // Retrying sync on repo A must not touch B's record, even with the
-    // single-source legacy escape hatch enabled.
-    const result = resolveMissingSyncFailures(repoA, { resolveUnattributed: true });
+    recordFailures('source-b', [{ path: 'notes/only-in-b.md', error: 'YAML parse failed' }], 'c1');
+    const result = resolveMissingSyncFailures(repoA, { sourceId: 'source-a', resolveUnattributed: true });
     expect(result.count).toBe(0);
     expect(unresolvedSyncFailures()).toHaveLength(1);
   });
 
   test('legacy unattributed records resolve only when caller attests single-source', async () => {
-    const { recordSyncFailures, resolveMissingSyncFailures, unresolvedSyncFailures } =
+    const { syncFailuresPath, resolveMissingSyncFailures, unresolvedSyncFailures } =
       await import('../src/core/sync.ts');
     const repoPath = join(tmpHome, 'repo');
     mkdirSync(repoPath, { recursive: true });
-
-    // Legacy row: no repo stamp (pre-v0.42 shape).
-    recordSyncFailures([{ path: 'notes/gone.md', error: 'YAML parse failed' }], 'c1');
-
-    // Default: unattributed rows are left alone.
+    writeFileSync(syncFailuresPath(), JSON.stringify({
+      path: 'notes/gone.md', error: 'YAML parse failed', commit: 'c1', ts: '2026-01-01T00:00:00Z',
+    }) + '\n');
     expect(resolveMissingSyncFailures(repoPath).count).toBe(0);
     expect(unresolvedSyncFailures()).toHaveLength(1);
-
-    // Single-source attestation: safe to resolve.
     expect(resolveMissingSyncFailures(repoPath, { resolveUnattributed: true }).count).toBe(1);
     expect(unresolvedSyncFailures()).toHaveLength(0);
   });
 
   test('unresolvedSyncFailures excludes legacy acknowledged rows', async () => {
     const { syncFailuresPath, unresolvedSyncFailures } = await import('../src/core/sync.ts');
-    const { dirname } = await import('path');
-    mkdirSync(dirname(syncFailuresPath()), { recursive: true });
-    writeFileSync(
-      syncFailuresPath(),
-      JSON.stringify({
-        path: 'notes/bad.md',
-        error: 'Frontmatter slug "bad" does not match path-derived slug "notes/bad"',
-        code: 'SLUG_MISMATCH',
-        commit: 'old',
-        ts: '2026-01-01T00:00:00Z',
-        acknowledged: true,
-      }) + '\n',
-    );
-
+    writeFileSync(syncFailuresPath(), JSON.stringify({
+      path: 'notes/bad.md', error: 'YAML parse failed', code: 'YAML_PARSE', commit: 'old',
+      ts: '2026-01-01T00:00:00Z', acknowledged: true,
+    }) + '\n');
     expect(unresolvedSyncFailures()).toEqual([]);
   });
 
@@ -209,11 +196,22 @@ describe('Bug 9 — sync-failures JSONL helpers', () => {
 
 describe('Bug 9 — doctor surfaces sync failures', () => {
   test('doctor source contains sync_failures check', async () => {
-    const source = await Bun.file(new URL('../src/commands/doctor.ts', import.meta.url)).text();
+    const source = doctorSource();
     expect(source).toContain('sync_failures');
-    expect(source).toContain('unresolvedSyncFailures');
+    expect(source).toContain('unacknowledgedSyncFailures');
     expect(source).toContain("'gbrain sync --skip-failed'");
-    expect(source).not.toContain('acknowledged_at) unacked++');
+  });
+
+  // issue #1939: BOTH doctor surfaces (local buildChecks + remote
+  // doctorReportRemote) must decide severity through the one shared helper so
+  // they can never drift. The remote surface must no longer hand-roll an
+  // `acknowledged_at` count (the old field-split that caused drift).
+  test('both doctor surfaces use the shared decideSyncFailureSeverity', async () => {
+    const source = doctorSource();
+    const occurrences = source.split('decideSyncFailureSeverity').length - 1;
+    expect(occurrences).toBeGreaterThanOrEqual(2); // local + remote
+    // remote no longer counts `!entry.acknowledged_at` by hand.
+    expect(source).not.toContain('if (!entry.acknowledged_at) unacked++');
   });
 });
 
@@ -233,10 +231,10 @@ describe('Bug 9 — sync.ts CLI flag wiring', () => {
     // performSync's inner ack path only fires when failedFiles.length > 0
     // in the current run. This test pins the up-front ack at the top of
     // runSync so the flag means "ack whatever is currently flagged".
+    // v0.42.42.0 (#2139, D13C): the pre-ack is now scoped PER SOURCE — `--all`
+    // acks every source, single-source acks only its own.
     const source = await Bun.file(new URL('../src/commands/sync.ts', import.meta.url)).text();
-    // Ensure the up-front check exists before the syncAll / performSync
-    // dispatch, gated on skipFailed.
-    expect(source).toMatch(/if \(skipFailed\) \{[\s\S]*?unacknowledgedSyncFailures\(\)[\s\S]*?acknowledgeSyncFailures\(\)/);
+    expect(source).toMatch(/if \(skipFailed\) \{[\s\S]*?syncAll \? acknowledgeFailures\(\) : acknowledgeFailures\(sourceId\)/);
   });
 
   test('acknowledgeSyncFailures clears stale failures end-to-end', async () => {
@@ -257,28 +255,30 @@ describe('Bug 9 — sync.ts CLI flag wiring', () => {
 
   test('performSync resolves missing failed files when --retry-failed is set', async () => {
     const source = await Bun.file(new URL('../src/commands/sync.ts', import.meta.url)).text();
-    expect(source).toMatch(/if \(opts\.retryFailed\) \{[\s\S]*?resolveMissingSyncFailures\(repoPath, \{ resolveUnattributed \}\)/);
-    // Legacy rows only auto-resolve on single-source brains.
+    expect(source).toMatch(/if \(opts\.retryFailed\) \{[\s\S]*?resolveMissingSyncFailures\(gitContextRoot, \{/);
+    expect(source).toContain('sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID');
     expect(source).toMatch(/count\(\*\)::int AS n FROM sources[\s\S]*?<= 1/);
   });
 
-  test('performSync gates sync.last_commit on failedFiles.length', async () => {
+  test('performSync gates the bookmark through the shared failure ledger', async () => {
     const source = await Bun.file(new URL('../src/commands/sync.ts', import.meta.url)).text();
-    // The gate exists and references the failure set.
-    expect(source).toContain('failedFiles.length > 0');
+    // issue #1939: the gate is now the shared applySyncFailureGate orchestrator.
+    expect(source).toContain('applySyncFailureGate');
     expect(source).toContain('blocked_by_failures');
   });
 
-  test('performFullSync gates on result.failures from runImport', async () => {
+  test('performFullSync routes failures through the same shared gate', async () => {
     const source = await Bun.file(new URL('../src/commands/sync.ts', import.meta.url)).text();
-    expect(source).toContain('result.failures.length > 0');
+    expect(source).toContain('result.failures');
+    expect(source).toContain('applySyncFailureGate');
   });
 
-  test('runImport returns RunImportResult with failures list', async () => {
+  test('runImport returns RunImportResult and records via the ledger', async () => {
     const source = await Bun.file(new URL('../src/commands/import.ts', import.meta.url)).text();
     expect(source).toContain('RunImportResult');
     expect(source).toContain('failures: Array<{ path: string; error: string }>');
-    expect(source).toContain('recordSyncFailures');
+    // issue #1939: import records source-scoped via recordFailures (sourceId, …).
+    expect(source).toContain('recordFailures');
   });
 });
 
@@ -308,6 +308,22 @@ describe('classifyErrorCode — error message to code mapping', () => {
   test('classifies NULL_BYTES', async () => {
     const { classifyErrorCode } = await import('../src/core/sync.ts');
     expect(classifyErrorCode('invalid UTF-8: null byte at position 3770')).toBe('NULL_BYTES');
+  });
+
+  test('classifies RENAME_RECONCILE from the #3056 sentinel message (was UNKNOWN — #3479 review)', async () => {
+    const { classifyErrorCode, renameReconcileErrorMessage } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      renameReconcileErrorMessage('people/carol.md', 'people/carol', 'permission denied for table pages'),
+    )).toBe('RENAME_RECONCILE');
+    // Envelope-stable: the wrapped cause must not steal the classification —
+    // the same sentinel class should not surface as STATEMENT_TIMEOUT one
+    // run and DB_DUPLICATE_KEY the next just because the cause text varies.
+    expect(classifyErrorCode(
+      renameReconcileErrorMessage('people/carol.md', 'people/carol', 'canceling statement due to statement timeout'),
+    )).toBe('RENAME_RECONCILE');
+    expect(classifyErrorCode(
+      renameReconcileErrorMessage('people/carol.md', undefined, 'duplicate key value violates unique constraint "pages_source_id_slug_key"'),
+    )).toBe('RENAME_RECONCILE');
   });
 
   test('classifies INVALID_UTF8', async () => {
@@ -565,5 +581,169 @@ describe('formatCodeBreakdown — dual input shape', () => {
   test('returns empty string for empty input', async () => {
     const { formatCodeBreakdown } = await import('../src/core/sync.ts');
     expect(formatCodeBreakdown([])).toBe('');
+  });
+});
+
+// v0.41.6.0 D2 — embedding error classifier patterns.
+// Verbatim provider error strings extracted from:
+//   src/core/ai/gateway.ts:973-988 (native-openai / native-google)
+//   src/core/ai/gateway.ts:995-997 (native-anthropic — no-touchpoint shape)
+//   src/core/ai/gateway.ts:250     (defaultResolveAuth — openai-compatible)
+// Each test pins a real-shaped message so a future provider-rename
+// (recipe.name change) will fail loudly here instead of silently
+// re-bucketing to UNKNOWN.
+describe('v0.41.6.0 D2 — embedding error classification', () => {
+  test('EMBEDDING_NO_CREDS matches native-openai verbatim throw', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('OpenAI embedding requires OPENAI_API_KEY.')).toBe('EMBEDDING_NO_CREDS');
+  });
+
+  test('EMBEDDING_NO_CREDS matches native-google verbatim throw', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'Google embedding requires GOOGLE_GENERATIVE_AI_API_KEY.'
+    )).toBe('EMBEDDING_NO_CREDS');
+  });
+
+  test('EMBEDDING_NO_CREDS matches Voyage AI openai-compat shape', async () => {
+    // defaultResolveAuth template: "${recipe.name} embedding requires ${REQUIRED_ENV}."
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('Voyage AI embedding requires VOYAGE_API_KEY.')).toBe('EMBEDDING_NO_CREDS');
+  });
+
+  test('EMBEDDING_NO_CREDS matches ZeroEntropy openai-compat shape', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('ZeroEntropy embedding requires ZEROENTROPY_API_KEY.')).toBe('EMBEDDING_NO_CREDS');
+  });
+
+  test('EMBEDDING_NO_CREDS matches DeepSeek openai-compat shape', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('DeepSeek embedding requires DEEPSEEK_API_KEY.')).toBe('EMBEDDING_NO_CREDS');
+  });
+
+  test('EMBEDDING_NO_CREDS matches the literal token (back-compat)', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('EMBEDDING_NO_CREDS — VOYAGE_API_KEY missing')).toBe('EMBEDDING_NO_CREDS');
+  });
+
+  test('EMBEDDING_NO_TOUCHPOINT matches anthropic-as-embed-provider misconfig', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'Anthropic has no embedding model. Use openai or google for embeddings.'
+    )).toBe('EMBEDDING_NO_TOUCHPOINT');
+  });
+
+  test('EMBEDDING_RATE_LIMIT matches HTTP 429 phrasing', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('Request failed with status 429: rate limit exceeded')).toBe('EMBEDDING_RATE_LIMIT');
+  });
+
+  test('EMBEDDING_RATE_LIMIT matches OpenAI "too many requests" phrasing', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('OpenAIRateLimitError: too many requests in 1m'))
+      .toBe('EMBEDDING_RATE_LIMIT');
+  });
+
+  test('EMBEDDING_QUOTA matches OpenAI insufficient_quota error', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'You exceeded your current quota, please check your plan and billing details. error code: insufficient_quota'
+    )).toBe('EMBEDDING_QUOTA');
+  });
+
+  test('EMBEDDING_QUOTA matches Anthropic credit-balance message', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('Your credit balance is too low to continue'))
+      .toBe('EMBEDDING_QUOTA');
+  });
+
+  test('EMBEDDING_OVERSIZE matches OpenAI max-context-length error', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      "This model's maximum context length is 8192 tokens, however you requested 9001 tokens"
+    )).toBe('EMBEDDING_OVERSIZE');
+  });
+
+  test('EMBEDDING_OVERSIZE matches max_tokens shape', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('max_tokens exceeded for embedding input')).toBe('EMBEDDING_OVERSIZE');
+  });
+
+  test('EMBEDDING_OVERSIZE matches Voyage "input length exceeds" shape', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('input length exceeds maximum')).toBe('EMBEDDING_OVERSIZE');
+  });
+
+  // Negative regression cases — make sure new patterns don't steal existing patterns' messages.
+  test('FILE_TOO_LARGE still classifies correctly (not overridden by new patterns)', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('File too large: 5242881 bytes')).toBe('FILE_TOO_LARGE');
+  });
+
+  test('STATEMENT_TIMEOUT still classifies correctly', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('canceling statement due to statement timeout')).toBe('STATEMENT_TIMEOUT');
+  });
+
+  test('SLUG_MISMATCH still classifies correctly', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'Frontmatter slug "x" does not match path-derived slug "y"'
+    )).toBe('SLUG_MISMATCH');
+  });
+
+  test('UNKNOWN still fires when no pattern matches', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('some random unmatched error message')).toBe('UNKNOWN');
+  });
+});
+
+// ─── #4543 — blocked_by_failures names the failing files + validate hint ───
+//
+// The v0.46.28.0 fix (#4496) made a status:'error' import result BLOCK the
+// bookmark instead of checkpointing it as done — but the blocked message only
+// showed code COUNTS (`YAML_PARSE: 1`), never WHICH file failed, and gave no
+// pointer to the tool that pinpoints the YAML issue. Operators had to open
+// sync-failures.jsonl by hand.
+describe('#4543 blocked output names failing files', () => {
+  test('formatFailedFileList names files with codes and skips sentinels', async () => {
+    const { formatFailedFileList } = await import('../src/core/sync.ts');
+    const out = formatFailedFileList([
+      { path: 'notes/bad.md', error: 'YAML parse failed: bad block mapping' },
+      { path: '<head>', error: 'history rewrite' },
+    ]);
+    expect(out).toContain('notes/bad.md');
+    expect(out).toContain('YAML_PARSE');
+    expect(out).not.toContain('<head>');
+  });
+
+  test('formatFailedFileList caps the list and counts the overflow', async () => {
+    const { formatFailedFileList } = await import('../src/core/sync.ts');
+    const many = Array.from({ length: 15 }, (_, i) => ({
+      path: `notes/f${String(i).padStart(2, '0')}.md`,
+      error: 'YAML parse failed',
+    }));
+    const out = formatFailedFileList(many, 10);
+    expect(out).toContain('notes/f09.md');
+    expect(out).not.toContain('notes/f10.md');
+    expect(out).toContain('and 5 more');
+  });
+
+  test('formatFailedFileList scrubs control characters from paths', async () => {
+    const { formatFailedFileList } = await import('../src/core/sync.ts');
+    const out = formatFailedFileList([
+      { path: 'notes/evil\x1b[2Jname.md', error: 'YAML parse failed' },
+    ]);
+    expect(out).not.toContain('\x1b');
+    expect(out).toContain('�');
+  });
+
+  test('both blocked gates name the files and hint at frontmatter validate', async () => {
+    const source = await Bun.file(new URL('../src/commands/sync.ts', import.meta.url)).text();
+    // Incremental gate names files from failedFiles; full gate from result.failures.
+    expect(source).toContain('formatFailedFileList(failedFiles)');
+    expect(source).toContain('formatFailedFileList(result.failures)');
+    // The actionable hint rides along in the blocked copy.
+    expect(source).toContain("gbrain frontmatter validate <path>");
   });
 });

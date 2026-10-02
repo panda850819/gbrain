@@ -12,7 +12,7 @@
  * Subcommands:
  *   gbrain integrity check              Read-only report to stdout
  *   gbrain integrity auto               Three-bucket repair with confidence
- *   gbrain integrity --dry-run          Same as auto, no writes
+ *   gbrain integrity auto --dry-run     Same as auto, no writes
  *
  * Three-bucket confidence (contract with x_handle_to_tweet resolver):
  *   >= 0.8 → auto-repair through BrainWriter transaction
@@ -98,8 +98,17 @@ export function findBareTweetHits(compiledTruth: string, slug: string): BareTwee
     }
     // If the line already contains a tweet URL, it's cited — skip
     if (URL_NEARBY_RE.test(line)) continue;
+    // If the line carries an explicit source citation (e.g.
+    // "[Source: X, @handle, 2026-05-28]"), it's already attributed — skip.
+    // Catches instructional/example lines in recipe docs that demonstrate
+    // the CORRECT citation format. (v0.42.x)
+    if (/\[\s*source:/i.test(line)) continue;
+    // Strip inline-code spans (`...`) before matching: phrases shown as
+    // inline-code templates in docs are examples, not bare claims. The
+    // fenced-code skip above only covers ``` blocks, not inline backticks.
+    const lineForMatch = line.replace(/`[^`]*`/g, '');
     for (const re of BARE_TWEET_PHRASES) {
-      const m = line.match(re);
+      const m = lineForMatch.match(re);
       if (m) {
         hits.push({ slug, line: i + 1, rawLine: line.trim(), phrase: m[0] });
         break; // one finding per line is enough
@@ -152,22 +161,45 @@ export function findExternalLinks(compiledTruth: string, slug: string): External
 
 interface ProgressEntry {
   slug: string;
+  /**
+   * Source the row belongs to. Progress used to be keyed by slug alone, so a
+   * resume SKIPPED same-slug pages in every other source (the scan iterates
+   * (slug, source_id) pairs). Legacy entries without source_id are treated as
+   * default-source only.
+   */
+  source_id?: string;
   status: 'repaired' | 'reviewed' | 'skipped' | 'error';
   timestamp: string;
+}
+
+/** Composite progress key — (source, slug), tab-separated (tabs can't appear in either). */
+function progressKey(sourceId: string | undefined, slug: string): string {
+  return `${sourceId ?? 'default'}\t${slug}`;
 }
 
 function loadProgress(): Set<string> {
   if (!existsSync(getProgressFile())) return new Set();
   const seen = new Set<string>();
   const content = readFileSync(getProgressFile(), 'utf-8');
+  let legacy = 0;
   for (const line of content.split('\n')) {
     if (!line.trim()) continue;
     try {
       const entry = JSON.parse(line) as ProgressEntry;
-      seen.add(entry.slug);
+      if (entry.source_id == null) legacy++;
+      seen.add(progressKey(entry.source_id, entry.slug));
     } catch {
       /* skip malformed lines */
     }
+  }
+  if (legacy > 0) {
+    // Pre-(source_id, slug) ledger entries key as default-source only, so a
+    // resume re-scans non-default-source pages they may have covered. Say so
+    // once — a silent partial re-scan reads as "resume is broken".
+    console.error(
+      `integrity: ${legacy} resume-ledger entr${legacy === 1 ? 'y' : 'ies'} predate source tracking; ` +
+      `matching them to the default source only (non-default-source pages re-scan — idempotent, just slower).`,
+    );
   }
   return seen;
 }
@@ -316,16 +348,21 @@ export async function scanIntegrity(
     }
   }
 
-  const allSlugs = [...(await engine.getAllSlugs())].sort();
+  // v0.32.8: listAllPageRefs replaces getAllSlugs+getPage N+1 pattern that
+  // silently defaulted to source_id='default' for non-default-source pages.
+  // Now we enumerate (slug, source_id) pairs and thread sourceId to getPage.
+  const allRefs = (await engine.listAllPageRefs()).sort((a, b) =>
+    a.slug.localeCompare(b.slug) || a.source_id.localeCompare(b.source_id)
+  );
 
   const bareHits: BareTweetHit[] = [];
   const externalHits: ExternalLinkHit[] = [];
   let pagesScanned = 0;
 
-  for (const slug of allSlugs) {
+  for (const { slug, source_id } of allRefs) {
     if (typeFilter && !slug.startsWith(`${typeFilter}/`)) continue;
     if (pagesScanned >= limit) break;
-    const page = await engine.getPage(slug);
+    const page = await engine.getPage(slug, { sourceId: source_id });
     if (!page) continue;
     // Skip grandfathered pages (opted out of brain-integrity enforcement)
     if ((page.frontmatter as Record<string, unknown> | undefined)?.validate === false) continue;
@@ -359,14 +396,16 @@ async function scanIntegrityBatch(
   // — gbrain lint should reject stringly-typed validate at write time.
   const validateCondition = sql`AND (frontmatter->>'validate' IS NULL OR frontmatter->>'validate' != 'false')`;
 
-  // DISTINCT ON (slug) mirrors getAllSlugs()'s Set<string> semantics: multi-source
-  // brains can have the same slug under multiple source_ids (UNIQUE(source_id, slug)
-  // since v0.18.0); we want one scan per slug, not one per row.
+  // v0.32.8: scan ONE row per (source_id, slug) pair, not one per slug.
+  // Pre-fix used DISTINCT ON (slug) which collapsed multi-source rows into
+  // one — that was the bug class. Now batch parity matches the sequential
+  // listAllPageRefs() walk: integrity violations in non-default-source pages
+  // get reported instead of silently shadowed by their default-source twin.
   const rows = await sql`
-    SELECT DISTINCT ON (slug) slug, compiled_truth, frontmatter
+    SELECT slug, compiled_truth, frontmatter
     FROM pages
     WHERE 1=1 ${typeCondition} ${validateCondition}
-    ORDER BY slug
+    ORDER BY source_id, slug
     LIMIT ${limit}
   `;
 
@@ -413,7 +452,18 @@ async function cmdAuto(args: string[]): Promise<void> {
   const engine = await connect();
   const registry = getDefaultRegistry();
   registerBuiltinResolvers(registry);
-  const writer = new BrainWriter(engine, { strictMode: 'off' });
+  // One writer PER SOURCE: BrainWriter scopes every read/write (and
+  // addTimelineEntry) to its sourceId — a single default-scoped writer used
+  // for every source's pages was the unscoped-check/scoped-write bug class.
+  const writersBySource = new Map<string, BrainWriter>();
+  const writerFor = (sourceId: string): BrainWriter => {
+    let w = writersBySource.get(sourceId);
+    if (!w) {
+      w = new BrainWriter(engine, { strictMode: 'off', sourceId });
+      writersBySource.set(sourceId, w);
+    }
+    return w;
+  };
 
   const ctx: ResolverContext = {
     engine,
@@ -433,6 +483,7 @@ async function cmdAuto(args: string[]): Promise<void> {
   let bucketReview = 0;
   let bucketSkip = 0;
   let bucketErr = 0;
+  let bucketDeadLink = 0;
   let pagesProcessed = 0;
 
   const { createProgress } = await import('../core/progress.ts');
@@ -440,14 +491,20 @@ async function cmdAuto(args: string[]): Promise<void> {
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
 
   try {
-    const allSlugs = [...(await engine.getAllSlugs())].sort();
-    const toScan = allSlugs.filter(s => !seen.has(s));
+    // v0.32.8: listAllPageRefs enumerates (slug, source_id) pairs so we
+    // can thread sourceId to getPage. Pre-fix this defaulted to 'default'
+    // and silently skipped non-default-source pages.
+    const allRefs = (await engine.listAllPageRefs()).sort((a, b) =>
+      a.slug.localeCompare(b.slug) || a.source_id.localeCompare(b.source_id)
+    );
+    const toScan = allRefs.filter(r => !seen.has(progressKey(r.source_id, r.slug)));
     progress.start('integrity.auto', toScan.length);
-    for (const slug of allSlugs) {
+    for (const { slug, source_id } of allRefs) {
       if (pagesProcessed >= limit) break;
-      if (seen.has(slug)) continue;
+      if (seen.has(progressKey(source_id, slug))) continue;
+      const writer = writerFor(source_id);
 
-      const page = await engine.getPage(slug);
+      const page = await engine.getPage(slug, { sourceId: source_id });
       if (!page) continue;
 
       pagesProcessed++;
@@ -476,26 +533,26 @@ async function cmdAuto(args: string[]): Promise<void> {
                 // Dry-run must NOT persist 'repaired' — the follow-on real
                 // run needs to revisit these slugs and actually write.
                 if (!dryRun) {
-                  appendProgress({ slug, status: 'repaired', timestamp: new Date().toISOString() });
+                  appendProgress({ slug, source_id, status: 'repaired', timestamp: new Date().toISOString() });
                 }
               } else if (result.confidence >= reviewLower) {
                 appendReview({ slug, hit, result, handle });
                 bucketReview++;
                 if (!dryRun) {
-                  appendProgress({ slug, status: 'reviewed', timestamp: new Date().toISOString() });
+                  appendProgress({ slug, source_id, status: 'reviewed', timestamp: new Date().toISOString() });
                 }
               } else {
                 logSkip({ slug, hit, reason: `confidence ${result.confidence.toFixed(2)} below threshold ${reviewLower}` });
                 bucketSkip++;
                 if (!dryRun) {
-                  appendProgress({ slug, status: 'skipped', timestamp: new Date().toISOString() });
+                  appendProgress({ slug, source_id, status: 'skipped', timestamp: new Date().toISOString() });
                 }
               }
             } catch (e) {
               bucketErr++;
               logSkip({ slug, hit, reason: `resolver error: ${e instanceof Error ? e.message : String(e)}` });
               if (!dryRun) {
-                appendProgress({ slug, status: 'error', timestamp: new Date().toISOString() });
+                appendProgress({ slug, source_id, status: 'error', timestamp: new Date().toISOString() });
               }
             }
           }
@@ -506,7 +563,7 @@ async function cmdAuto(args: string[]): Promise<void> {
           }
           bucketSkip += hits.length;
           if (!dryRun) {
-            appendProgress({ slug, status: 'skipped', timestamp: new Date().toISOString() });
+            appendProgress({ slug, source_id, status: 'skipped', timestamp: new Date().toISOString() });
           }
         }
       }
@@ -528,7 +585,13 @@ async function cmdAuto(args: string[]): Promise<void> {
                 hit: { slug, line: hit.line, rawLine: hit.url, phrase: 'dead-link' },
                 reason: `dead link: ${result.value.reason ?? 'unknown'}`,
               });
-              bucketReview++;
+              // Dead links have no confidence score and are never written to
+              // the review file (appendReview() is only called from the
+              // bare-tweet path above) — they land in the skip log via
+              // logSkip() a few lines up. Count them separately so the
+              // printed "Review queue" total only ever reflects what's
+              // actually in ~/.gbrain/integrity-review.md.
+              bucketDeadLink++;
             }
           } catch {
             /* transient; don't fail the run */
@@ -547,6 +610,7 @@ async function cmdAuto(args: string[]): Promise<void> {
     console.log(`Review queue (≥${reviewLower} <${confidenceThreshold}): ${bucketReview}`);
     console.log(`Skipped (<${reviewLower}): ${bucketSkip}`);
     if (bucketErr > 0) console.log(`Resolver errors: ${bucketErr}`);
+    if (bucketDeadLink > 0) console.log(`Dead links surfaced (see skipped log): ${bucketDeadLink}`);
     console.log(`\nReview queue: ${getReviewFile()}`);
     console.log(`Skipped log:  ${getLogFile()}`);
     console.log(`Progress:     ${getProgressFile()}`);

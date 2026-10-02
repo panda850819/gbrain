@@ -1,11 +1,54 @@
 import postgres from 'postgres';
 import { GBrainError, type EngineConfig } from './types.ts';
-import { SCHEMA_SQL } from './schema-embedded.ts';
+import { SCHEMA_SQL } from './schema-embedded.generated.ts';
+import { applyPostgresForwardReferenceBootstrap } from './postgres-engine/forward-reference-bootstrap.ts';
 import type { BrainEngine } from './engine.ts';
 import { verifySchema } from './schema-verify.ts';
+import { isRetryableConnError } from './retry-matcher.ts';
 
 let sql: ReturnType<typeof postgres> | null = null;
 let connectedUrl: string | null = null;
+
+/**
+ * #1972: hard upper bound (seconds) on a single pool `.end()` drain. postgres.js
+ * accepts `{ timeout }` but applies it internally — against PgBouncer
+ * transaction-mode the drain can still hang, and a stubbed `.end()` ignores it
+ * entirely. So `endPoolBounded` ALSO wraps each end in a gbrain-owned
+ * Promise.race and passes this value as the postgres.js hint so a healthy drain
+ * still finishes fast.
+ */
+export const POOL_END_TIMEOUT_SECONDS = 2;
+
+/**
+ * #1972: end a postgres.js pool with a gbrain-owned hard bound. Resolves as soon
+ * as `.end()` settles OR after POOL_END_TIMEOUT_SECONDS + a small slack — so
+ * teardown never hangs (the prior bare `.end()` blocked until the CLI's 10s
+ * force-exit fired, which `process.exit()`s and truncated pending stdout, e.g.
+ * #1959's relational query came back empty). Never throws: a teardown that
+ * rejects is worse than one that races past a stuck socket. The race timer is
+ * the real guarantee; `{ timeout }` just lets a healthy drain return in ms.
+ *
+ * Note callers that close MULTIPLE pools should `Promise.all` them rather than
+ * awaiting sequentially, so the per-pool bounds run concurrently instead of
+ * stacking.
+ */
+export async function endPoolBounded(
+  pool: { end: (opts?: { timeout?: number }) => Promise<void> },
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, POOL_END_TIMEOUT_SECONDS * 1000 + 500);
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([
+      pool.end({ timeout: POOL_END_TIMEOUT_SECONDS }).catch(() => { /* idempotent / already-closed */ }),
+      guard,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * Default pool size for Postgres connections. Users on the Supabase transaction
@@ -71,6 +114,55 @@ export function resolvePoolSize(explicit?: number): number {
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
   return DEFAULT_POOL_SIZE_FALLBACK;
+}
+
+let warnedBadMaxLifetime = false;
+/** Test-only: reset the warn-once latch. */
+export function _resetMaxLifetimeWarningForTests(): void {
+  warnedBadMaxLifetime = false;
+}
+
+/**
+ * Client-pool connection max lifetime for every postgres() call site
+ * (module singleton, engine instance pool, ConnectionManager read + direct
+ * pools).
+ *
+ * postgres.js already defaults to `60 * (30 + Math.random() * 30)` — and
+ * critically that built-in default is a FUNCTION, re-evaluated PER
+ * CONNECTION (connection.js: `typeof seconds === 'function' ? seconds() :
+ * seconds`), so each connection gets its own 30–60min deadline. A
+ * pre-evaluated number would make every connection in a pool share ONE
+ * recycle deadline — a warm-up burst then reconnects simultaneously
+ * (data-migration specialist finding). The default here is therefore the
+ * same per-connection jitter function; only the env override returns a
+ * fixed number (the explicit escape hatch):
+ *
+ *   GBRAIN_POOL_MAX_LIFETIME_S=900   # recycle after 15 min
+ *   GBRAIN_POOL_MAX_LIFETIME_S=0     # disable recycling entirely
+ *
+ * max_lifetime only recycles connections as they are RETURNED to the pool;
+ * it cannot reclaim a leaked checkout — this is explicitness + a knob, not
+ * a starvation fix. Invalid values warn once on stderr and fall back to the
+ * default. The env param is injectable so tests never mutate process.env.
+ */
+export function resolveMaxLifetimeSeconds(
+  env: Record<string, string | undefined> = process.env,
+): number | null | (() => number) {
+  const raw = env.GBRAIN_POOL_MAX_LIFETIME_S;
+  if (raw !== undefined && raw !== '') {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= 0) {
+      return parsed === 0 ? null : parsed;
+    }
+    if (!warnedBadMaxLifetime) {
+      warnedBadMaxLifetime = true;
+      process.stderr.write(
+        `[gbrain] Ignoring invalid GBRAIN_POOL_MAX_LIFETIME_S=${JSON.stringify(raw)} (want a non-negative integer of seconds; 0 disables); using the jittered 30-60min default\n`,
+      );
+    }
+  }
+  // Per-connection jitter, matching the postgres.js built-in default shape.
+  return () => Math.floor(60 * (30 + Math.random() * 30));
 }
 
 /**
@@ -159,13 +251,27 @@ export function getConnection(): ReturnType<typeof postgres> {
   return sql;
 }
 
-export async function connect(config: EngineConfig): Promise<void> {
+/**
+ * Connect the module-level singleton. Returns `true` iff THIS call created the
+ * singleton, `false` if it joined an existing one.
+ *
+ * #1471 ownership: the create-vs-join decision is made HERE, atomically. There
+ * is no `await` between the `if (sql)` null-check below and the synchronous
+ * `sql = postgres(url, opts)` assignment, so two concurrent module connects
+ * cannot both observe `sql === null` and both create. Callers store the return
+ * as their ownership token (`PostgresEngine._ownsModuleSingleton`); only the
+ * creator may later tear the singleton down. Borrowers (probe engines created
+ * while the singleton already exists) get `false` and must NOT disconnect it.
+ *
+ * Back-compat: callers that ignore the return value are unaffected.
+ */
+export async function connect(config: EngineConfig): Promise<boolean> {
   if (sql) {
     // Warn if a different URL is passed — the old connection is still in use
     if (config.database_url && connectedUrl && config.database_url !== connectedUrl) {
       console.warn('[gbrain] connect() called with a different database_url but a connection already exists. Using existing connection.');
     }
-    return;
+    return false; // joined an existing singleton — caller is a borrower
   }
 
   const url = config.database_url;
@@ -184,10 +290,17 @@ export async function connect(config: EngineConfig): Promise<void> {
       max: resolvePoolSize(),
       idle_timeout: 20,
       connect_timeout: 10,
+      // Explicit (matches the postgres.js implicit default; GBRAIN_POOL_MAX_LIFETIME_S overrides).
+      max_lifetime: resolveMaxLifetimeSeconds(),
       types: {
         // Register pgvector type
         bigint: postgres.BigInt,
       },
+      // Silence postgres NOTICE-level messages by default ("relation already
+      // exists, skipping" floods stdout under idempotent CREATE statements
+      // during migrations + initSchema, and breaks stdout-parsing callers like
+      // `gbrain jobs submit --json | ...`). Opt back in with GBRAIN_PG_NOTICES=1.
+      onnotice: process.env.GBRAIN_PG_NOTICES === '1' ? undefined : () => {},
     };
     if (Object.keys(timeouts).length > 0) {
       opts.connection = timeouts;
@@ -207,6 +320,7 @@ export async function connect(config: EngineConfig): Promise<void> {
     connectedUrl = url;
 
     await setSessionDefaults(sql);
+    return true; // we created the singleton — caller is the owner
   } catch (e: unknown) {
     sql = null;
     connectedUrl = null;
@@ -220,18 +334,40 @@ export async function connect(config: EngineConfig): Promise<void> {
 }
 
 export async function disconnect(): Promise<void> {
-  if (sql) {
-    await sql.end();
-    sql = null;
-    connectedUrl = null;
-  }
+  // v0.41.25.0 (#1570) — instrument every disconnect call site so v0.41.26
+  // can identify the caller that's nulling the module singleton mid-cycle.
+  // Best-effort: audit failure must never block the actual disconnect.
+  // The audit module is lazy-imported to keep db.ts cold-path-free for
+  // tools that import db without ever calling disconnect.
+  try {
+    const { logDbDisconnect } = await import('./audit/db-disconnect-audit.ts');
+    // db.ts is always the module-singleton path by construction; no
+    // instance-pool callers go through here.
+    logDbDisconnect('postgres', 'module');
+  } catch { /* best-effort; never block disconnect on audit failure */ }
+  // #1471 (codex #6): snapshot + null the singleton BEFORE awaiting end(), so a
+  // concurrent module connect() can't observe a non-null `sql` mid-teardown and
+  // join a pool that's already closing. Mirrors the v0.41.8.0 PGLite-disconnect
+  // snapshot+early-null pattern.
+  const s = sql;
+  sql = null;
+  connectedUrl = null;
+  if (s) await endPoolBounded(s);
 }
 
 export async function initSchema(): Promise<void> {
   const conn = getConnection();
   // Advisory lock prevents concurrent initSchema() calls from deadlocking
+  // Lock-census (PR6 D5): INTENTIONALLY brain-global (session lock, fixed key 42) — schema replay mutates the whole database, not one source.
   await conn`SELECT pg_advisory_lock(42)`;
   try {
+    // #4477: run the same forward-reference bootstrap as
+    // PostgresEngine.initSchema BEFORE replaying the schema blob. Without
+    // it, an older brain whose tables predate the blob's forward-referenced
+    // columns (e.g. pages.deleted_at ← pages_deleted_at_purge_idx) wedges
+    // on the blob's CREATE INDEX. Idempotent single-probe no-op on fresh
+    // installs and modern brains.
+    await applyPostgresForwardReferenceBootstrap(conn);
     await conn.unsafe(SCHEMA_SQL);
   } finally {
     await conn`SELECT pg_advisory_unlock(42)`;
@@ -247,19 +383,14 @@ export async function withTransaction<T>(fn: (tx: ReturnType<typeof postgres>) =
   }) as Promise<T>;
 }
 
-const RETRYABLE_DB_CONNECT_PATTERNS = [
-  /password authentication failed/i,
-  /connection refused/i,
-  /the database system is starting up/i,
-  /Connection terminated unexpectedly/i,
-  /ECONNRESET/i,
-];
-
-export function isRetryableDbConnectError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (!msg) return false;
-  return RETRYABLE_DB_CONNECT_PATTERNS.some(p => p.test(msg));
-}
+// issue #1720 (proposal 4): the startup connect matcher and the runtime
+// matcher drifted — this used to be a private 5-pattern list that predated
+// /connection.*closed/i and the CONNECTION_ENDED/CONNECTION_CLOSED codes, so
+// a pooler close hitting connectWithRetry was treated as permanent. One
+// canonical source now: retry-matcher.ts's isRetryableConnError (a strict
+// superset of the old list). Do NOT reintroduce a local pattern list here;
+// the agreement guard in test/worker-conn-resilience-1720.test.ts pins it.
+export const isRetryableDbConnectError = isRetryableConnError;
 
 export interface ConnectWithRetryOpts {
   attempts?: number;

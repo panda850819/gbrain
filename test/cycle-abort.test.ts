@@ -104,12 +104,18 @@ describe('autopilot-cycle handler contract (v0.20.5)', () => {
       'utf8',
     );
 
-    // The autopilot-cycle handler MUST pass signal to runCycle
-    // This is a source-level regression guard
-    const handlerBlock = jobsSource.slice(
-      jobsSource.indexOf("worker.register('autopilot-cycle'"),
-      jobsSource.indexOf("worker.register('autopilot-cycle'") + 2000,
-    );
+    // The autopilot-cycle handler MUST pass signal to runCycle.
+    // Source-level regression guard.
+    //
+    // The slice window was bumped to 6000 in v0.39 (source_id validation +
+    // archive recheck + pull threading) and to 8000 in v0.46.20 (#4250
+    // queue-boundary phase normalization) — each wave adds handler prologue
+    // that pushes the runCycle({signal:...}) call further down. The intent of
+    // the guard is unchanged: "the autopilot-cycle handler passes job.signal
+    // to runCycle." The window just needs to span any reasonable handler.
+    const handlerStart = jobsSource.indexOf("registerBuiltinJob(worker, engine, 'autopilot-cycle'");
+    expect(handlerStart).toBeGreaterThan(-1);
+    const handlerBlock = jobsSource.slice(handlerStart, handlerStart + 8000);
 
     expect(handlerBlock).toContain('signal: job.signal');
   });
@@ -136,13 +142,107 @@ describe('autopilot-cycle handler contract (v0.20.5)', () => {
       'utf8',
     );
 
-    // Count checkAborted calls in the runCycle function body
+    // Count checkAborted calls in the runCycle function body. W0 fix-wave:
+    // boundaries check `cycleSignal` — the combined external-caller +
+    // lock-steal signal — so a stolen lock aborts at the same seams an
+    // external abort always did.
     const runCycleBody = cycleSource.slice(
       cycleSource.indexOf('export async function runCycle'),
     );
-    const checkCalls = (runCycleBody.match(/checkAborted\(opts\.signal\)/g) || []).length;
+    const checkCalls = (runCycleBody.match(/checkAborted\(cycleSignal\)/g) || []).length;
 
     // Should have at least 6 (one per phase)
     expect(checkCalls).toBeGreaterThanOrEqual(6);
+    // And the combined signal must actually fold BOTH sources.
+    expect(runCycleBody).toContain('anyAbortSignal([externalSignal, stolen.signal])');
+  });
+});
+
+describe('#1972 — complete cooperative-abort coverage', () => {
+  test('aborted signal makes runCycle report partial + reason "aborted" (terminal guard)', async () => {
+    // phases:[] means no between-phase checkAborted fires, so execution reaches
+    // the TERMINAL guard (Codex #9). With a pre-aborted signal it must NOT
+    // report success — status 'partial', reason 'aborted'.
+    const { runCycle } = await import('../src/core/cycle.ts');
+    const abort = new AbortController();
+    abort.abort(new Error('timeout'));
+    const report = await runCycle(null, {
+      brainDir: '/nonexistent-for-test',
+      phases: [],
+      signal: abort.signal,
+    });
+    expect(report.status).toBe('partial');
+    expect(report.reason).toBe('aborted');
+  });
+
+  test('cycle.ts threads opts.signal into every long phase + guards the success stamp', async () => {
+    const fs = await import('fs');
+    const src = fs.readFileSync(new URL('../src/core/cycle.ts', import.meta.url), 'utf8');
+    const body = src.slice(src.indexOf('export async function runCycle'));
+    // Each long phase receives the signal (W0: the combined cycleSignal, so
+    // phases also stop on lock-steal, not just external aborts).
+    expect(body).toContain('runPhaseExtract(engine, brainDir, dryRun, syncPagesAffected, cycleSignal, cycleSourceId)');
+    expect(body).toMatch(/runPhaseExtractFacts\([^)]*cycleSignal\)/);
+    expect(body).toContain('signal: cycleSignal'); // consolidate opts
+    expect(body).toContain('runPhaseLint(brainDir, dryRun, engine, cycleSignal)');
+    // Reaper runs at cycle start.
+    expect(body).toContain('reapDeadHolderLocks(engine)');
+    // Terminal guard: the success stamp is gated on !aborted, and the report
+    // carries reason 'aborted'.
+    expect(body).toContain('!aborted');
+    expect(body).toContain("reason: 'aborted'");
+    // Phase-duration force-evict attribution log (T11).
+    expect(body).toContain('FORCE_EVICT_DEADLINE_MS');
+  });
+
+  test('every long phase core checks isAborted in its batch loop', async () => {
+    const fs = await import('fs');
+    const read = (p: string) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
+    expect(read('../src/commands/extract.ts')).toContain('if (isAborted(signal)) return;');
+    expect(read('../src/core/cycle/extract-facts.ts')).toContain('if (isAborted(opts.signal)) break;');
+    expect(read('../src/core/cycle/phases/consolidate.ts')).toContain('if (isAborted(opts.signal)) break;');
+    expect(read('../src/core/cycle/phantom-redirect.ts')).toContain('if (isAborted(signal)) break;');
+    expect(read('../src/commands/lint.ts')).toContain('if (isAborted(opts.signal)) break;');
+  });
+});
+
+describe('#4077 — synthesize/patterns cooperative-abort threading', () => {
+  test('cycle.ts forwards cycleSignal into the synthesize and patterns phase opts', async () => {
+    const fs = await import('fs');
+    const src = fs.readFileSync(new URL('../src/core/cycle.ts', import.meta.url), 'utf8');
+    const body = src.slice(src.indexOf('export async function runCycle'));
+    // Bounded to each call's own opts literal — an unanchored [\s\S]*? regex
+    // would false-pass on consolidate's `signal: cycleSignal` further down.
+    const callOf = (fnName: string): string => {
+      const start = body.indexOf(`${fnName}(engine, {`);
+      expect(start).toBeGreaterThan(-1);
+      return body.slice(start, body.indexOf('}))', start));
+    };
+    // W0 posture: phases receive the COMBINED cycleSignal (external abort +
+    // lock steal), same as consolidate — not the raw opts.signal.
+    expect(callOf('runPhaseSynthesize')).toContain('signal: cycleSignal,');
+    expect(callOf('runPhasePatterns')).toContain('signal: cycleSignal,');
+  });
+
+  test('synthesize threads its signal through judge, inline drain, and completion wait', async () => {
+    const fs = await import('fs');
+    const src = fs.readFileSync(new URL('../src/core/cycle/synthesize.ts', import.meta.url), 'utf8');
+    expect(src).toContain('signal?: AbortSignal');
+    // Triage pass carries the signal into every judge call (gateway abortSignal).
+    expect(src).toMatch(/judgeSignificance\(judge, t, cfg\.model, \{[\s\S]*?signal: cfg\.signal,[\s\S]*?\}\)/);
+    expect(src).toMatch(/runSubagentsInline\([\s\S]{0,240}?opts\.signal/);
+    expect(src).toMatch(/waitForCompletionRenewing\(queue, jobId, \{[\s\S]*?signal: opts\.signal,/);
+    // Write boundaries downstream of the drain are signal-guarded.
+    expect(src).toContain('stampDreamProvenance(engine, writtenRefs, summaryDate, opts.signal)');
+    expect(src).toContain('reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal)');
+  });
+
+  test('patterns sibling threads the same signal through inline drain, wait, and reverse-write', async () => {
+    const fs = await import('fs');
+    const src = fs.readFileSync(new URL('../src/core/cycle/patterns.ts', import.meta.url), 'utf8');
+    expect(src).toContain('signal?: AbortSignal');
+    expect(src).toMatch(/runSubagentsInline\([\s\S]{0,240}?opts\.signal/);
+    expect(src).toMatch(/waitForCompletionRenewing\(queue, job\.id, \{[\s\S]*?signal: opts\.signal,/);
+    expect(src).toContain('reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal)');
   });
 });

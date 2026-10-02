@@ -66,14 +66,23 @@ describe('Layer 2 — isCodeFilePath widening', () => {
     expect(isCodeFilePath('contracts/Token.sol')).toBe(true);
   });
 
-  test('Web + config extensions (CSS, HTML, Vue, JSON, YAML, TOML)', () => {
+  test('Web + config extensions (CSS, HTML, Astro, Svelte, Vue, JSON, YAML, TOML)', () => {
     expect(isCodeFilePath('src/app.css')).toBe(true);
     expect(isCodeFilePath('public/index.html')).toBe(true);
+    expect(isCodeFilePath('src/pages/index.astro')).toBe(true);
+    expect(isCodeFilePath('src/routes/App.svelte')).toBe(true);
     expect(isCodeFilePath('src/App.vue')).toBe(true);
     expect(isCodeFilePath('package.json')).toBe(true);
     expect(isCodeFilePath('config.yaml')).toBe(true);
     expect(isCodeFilePath('config.yml')).toBe(true);
     expect(isCodeFilePath('Cargo.toml')).toBe(true);
+  });
+
+  // v0.41 D2 wave (#1173): SQL via tree-sitter-sql.
+  test('SQL classified as code (#1173)', () => {
+    expect(isCodeFilePath('migrations/001_init.sql')).toBe(true);
+    expect(isCodeFilePath('schema.sql')).toBe(true);
+    expect(isCodeFilePath('Schema.SQL')).toBe(true); // case-insensitive
   });
 
   test('markdown is NOT classified as code', () => {

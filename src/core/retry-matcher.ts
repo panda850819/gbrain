@@ -9,6 +9,16 @@
  * Before this module these predicates lived inline at each site and drifted
  * over time. One source of truth here; new call sites import the typed
  * helper instead of pattern-matching the same regexes again.
+ *
+ * TWO-AXIS DESIGN NOTE (do not "fix" one side to match the other):
+ * this module answers "should I retry?" — and deliberately treats
+ * `password authentication failed` as RETRYABLE (auth race during DNS
+ * failover). The REASON classifier (`src/core/pg-access-classify.ts`)
+ * answers "what went wrong and what fixes it?" — and reports the same
+ * error as `auth_failed` with `transient: false` (a persistently wrong
+ * password is not transient). Both are correct on their own axis.
+ * This module's only exports consumed there are the predicates plus the
+ * `getCode`/`getMessage` shape helpers; no new patterns land here.
  */
 
 const CONN_PATTERNS = [
@@ -20,15 +30,39 @@ const CONN_PATTERNS = [
   /connection.*closed/i,
   /server closed the connection/i,
   /could not connect to server/i,
+  // v0.41.2.1: gbrain's own GBrainError thrown by getConnection() when
+  // the singleton pool was nulled (engine.disconnect mid-cycle, or
+  // postgres.js's auto-recovery between queries). Matches the literal
+  // message shape from PR #1416's reported batch-loss incident.
+  /No database connection/i,
+  // v0.42.5.0 (issue #1678): postgres.js throws errors carrying
+  // `code: 'CONNECTION_ENDED'` (a LIBRARY code, not an 08xxx SQLSTATE) when a
+  // transaction-mode pooler reaps an idle socket between queries. Without an
+  // explicit match it was only accidentally caught by /connection.*closed/i.
+  // Match the message form too for wrappers that fold the code into the text.
+  /CONNECTION_ENDED/i,
+  // v0.42.x (#1794): Supavisor transaction-pooler session exhaustion. When all
+  // upstream connections are checked out the pooler rejects new sessions
+  // ("MaxClientsInSessionMode" / EMAXCONNSESSION) and Postgres raises SQLSTATE
+  // 53300 (too_many_connections). Both are transient under load — without a
+  // retry, the checkpoint write (and every other pool-contending write) is
+  // dropped during the exact spike #1794's resumable sync must survive.
+  /EMAXCONNSESSION/i,
+  /too many clients already/i,
+  /max.*clients?.*in session mode/i,
+  /remaining connection slots are reserved/i,
 ];
 
 interface PgError {
   code?: string;
   message?: string;
   cause?: unknown;
+  // v0.41.2.1: gbrain's GBrainError uses `problem` (typed) + `detail` so
+  // callers can switch on the engine-state class without string matching.
+  problem?: string;
 }
 
-function getCode(err: unknown): string | undefined {
+export function getCode(err: unknown): string | undefined {
   if (err && typeof err === 'object') {
     const code = (err as PgError).code;
     if (typeof code === 'string') return code;
@@ -36,7 +70,7 @@ function getCode(err: unknown): string | undefined {
   return undefined;
 }
 
-function getMessage(err: unknown): string {
+export function getMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (err && typeof err === 'object') {
     const msg = (err as PgError).message;
@@ -85,8 +119,44 @@ export function isRetryableConnError(err: unknown): boolean {
   //   08001 sqlclient_unable_to_establish_sqlconnection
   //   08004 sqlserver_rejected_establishment_of_sqlconnection
   if (code && /^08/.test(code)) return true;
+  // v0.42.5.0 (issue #1678): postgres.js's library-level connection-ended
+  // code. Not an 08xxx SQLSTATE, so the /^08/ test above misses it.
+  if (code === 'CONNECTION_ENDED') return true;
+  // issue #1720: postgres.js also throws code 'CONNECTION_CLOSED' when the
+  // pooler closes the socket mid-query ("write CONNECTION_CLOSED host:port").
+  // The message form is already caught by /connection.*closed/i below; match
+  // the code too for wrappers that rethrow with the code but a new message.
+  if (code === 'CONNECTION_CLOSED') return true;
+  // v0.42.x (#1794): SQLSTATE 53300 too_many_connections — pool/pooler
+  // exhaustion. Starts with 53 not 08, so the /^08/ test above misses it.
+  // Transient: the spike clears as in-flight queries release connections.
+  if (code === '53300') return true;
+  // v0.41.2.1: typed-shape match for gbrain's own GBrainError
+  // (problem === 'No database connection'). Avoids brittle string match
+  // when the error wrapper is gbrain-internal.
+  if (
+    err && typeof err === 'object' &&
+    (err as PgError).problem === 'No database connection'
+  ) {
+    return true;
+  }
   const msg = getMessage(err);
   return CONN_PATTERNS.some(p => p.test(msg));
+}
+
+/**
+ * issue #1685 (CODEX #8): is this error specifically a POOLER REAP — postgres.js's
+ * library-level `CONNECTION_ENDED` code (the transaction-mode pooler dropping an
+ * idle socket between ticks)? Narrower than `isRetryableConnError`, which also
+ * matches 08xxx SQLSTATEs, network blips, and auth races. Used by
+ * `PostgresEngine.reconnect()` to label the pool-recovery audit honestly so a
+ * generic reconnect isn't mis-recorded as a reap.
+ */
+export function isConnectionEndedError(err: unknown): boolean {
+  const code = getCode(err);
+  if (code === 'CONNECTION_ENDED') return true;
+  const msg = getMessage(err);
+  return /CONNECTION_ENDED/i.test(msg);
 }
 
 /**

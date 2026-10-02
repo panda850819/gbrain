@@ -36,9 +36,13 @@
  * stay valid forever because no row_num ever shifts.
  */
 
-export type TakeKind = 'fact' | 'take' | 'bet' | 'hunch';
+// v0.38: TakeKind opens from closed 4-element union to string (T3 + T10).
+// See `src/core/engine.ts` TakeKind for full rationale. Runtime validation
+// moves to active schema pack's annotation primitive declarations; the
+// pre-v0.38 {fact|take|bet|hunch} seed lives in `gbrain-base.yaml`.
+export type TakeKind = string;
 
-export type TakeQuality = 'correct' | 'incorrect' | 'partial';
+export type TakeQuality = 'correct' | 'incorrect' | 'partial' | 'unresolvable';
 
 export interface ParsedTake {
   rowNum: number;
@@ -130,6 +134,7 @@ export const TAKES_FENCE_END   = '<!--- gbrain:takes:end -->';
 import { SLUG_SEGMENT_PATTERN } from './sync.ts';
 export const HOLDER_REGEX = new RegExp(
   `^(?:world|brain|(?:people|companies)/${SLUG_SEGMENT_PATTERN.source}|${SLUG_SEGMENT_PATTERN.source})$`,
+  'u', // required by SLUG_SEGMENT_PATTERN's \p{...} classes (#3417)
 );
 
 /**
@@ -144,7 +149,7 @@ export function isValidHolder(holder: string): boolean {
 }
 
 const KIND_VALUES: ReadonlySet<string> = new Set(['fact', 'take', 'bet', 'hunch']);
-const QUALITY_VALUES: ReadonlySet<string> = new Set(['correct', 'incorrect', 'partial']);
+const QUALITY_VALUES: ReadonlySet<string> = new Set(['correct', 'incorrect', 'partial', 'unresolvable']);
 
 // v0.30.0: header tokens that mark a v0.30-shape fence. Presence of `quality`
 // (or any other resolution column) widens the parser to read 7+ extra cells
@@ -204,25 +209,17 @@ function parseStringCell(raw: string): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-// Match a markdown table row's cell-stripped content. Allows surrounding
-// whitespace and tolerates trailing `|`.
-function parseRowCells(line: string): string[] | null {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith('|') || !trimmed.includes('|', 1)) return null;
-  // Strip leading and trailing pipes, split on `|`, trim cells.
-  const inner = trimmed.replace(/^\|/, '').replace(/\|$/, '');
-  return inner.split('|').map(c => c.trim());
-}
-
-function isSeparatorRow(cells: string[]): boolean {
-  return cells.every(c => /^[-:\s]+$/.test(c)) && cells.length > 0;
-}
-
-function stripStrikethrough(s: string): { text: string; struck: boolean } {
-  const m = s.match(/^~~(.+?)~~$/);
-  if (m) return { text: m[1].trim(), struck: true };
-  return { text: s, struck: false };
-}
+// Pipe-row parsing, separator detection, and strikethrough handling moved
+// to src/core/fence-shared.ts in v0.32.2 — same primitives are used by
+// facts-fence and any future fence-based category. Behavior here is
+// byte-identical to the v0.28-shipped inline versions; the takes-fence
+// test suite is the regression gate.
+import {
+  parseRowCells,
+  isSeparatorRow,
+  stripStrikethrough,
+  escapeFenceCell as safeFenceCell,
+} from './fence-shared.ts';
 
 function parseSinceCell(raw: string): { since?: string; until?: string } {
   const trimmed = raw.trim();
@@ -244,7 +241,21 @@ export function parseTakesFence(body: string): ParseResult {
   const endIdx   = body.indexOf(TAKES_FENCE_END, beginIdx + TAKES_FENCE_BEGIN.length);
   const warnings: string[] = [];
 
-  if (beginIdx === -1 && endIdx === -1) return { takes: [], warnings };
+  if (beginIdx === -1 && endIdx === -1) {
+    // #3769: the canonical markers use the THREE-dash comment form
+    // (`<!--- gbrain:takes:begin -->`). A body that mentions the marker text
+    // without the exact form — most commonly the standard two-dash
+    // `<!-- gbrain:takes:begin -->` an author or agent writes from memory —
+    // is a fence the author MEANT to write. Flag it instead of silently
+    // parsing zero takes.
+    if (body.includes('gbrain:takes:begin')) {
+      warnings.push(
+        'TAKES_FENCE_NEAR_MISS: found "gbrain:takes:begin" but not the exact ' +
+        `marker "${TAKES_FENCE_BEGIN}" — use the three-dash comment form`,
+      );
+    }
+    return { takes: [], warnings };
+  }
   if (beginIdx === -1 || endIdx === -1) {
     warnings.push('TAKES_FENCE_UNBALANCED: missing begin or end marker');
     return { takes: [], warnings };
@@ -361,7 +372,7 @@ export function parseTakesFence(body: string): ParseResult {
     takes.push({
       rowNum,
       claim: claimText,
-      kind: kind as TakeKind,
+      kind: kind as string,
       holder: holderRaw.trim(),
       weight,
       sinceDate: since,
@@ -418,8 +429,10 @@ export function renderTakesFence(takes: ParsedTake[]): string {
     const sinceCell = t.untilDate ? `${t.sinceDate ?? ''} → ${t.untilDate}` : (t.sinceDate ?? '');
     const w = formatWeight(t.weight);
     const source = t.source ?? '';
-    // Escape any pipes inside cells so the table doesn't break.
-    const safe = (s: string) => s.replace(/\|/g, '\\|');
+    // Escape any pipes inside cells so the table doesn't break. The
+    // escapeFenceCell primitive lives in fence-shared.ts and is re-aliased
+    // as `safe` here purely to keep the row-render lines visually compact.
+    const safe = safeFenceCell;
     const baseCells = `| ${t.rowNum} | ${safe(claimCell)} | ${t.kind} | ${safe(t.holder)} | ${w} | ${safe(sinceCell)} | ${safe(source)} |`;
     if (!hasAnyResolution) return baseCells;
     // Resolution cells. Empty string for unresolved rows keeps the table
@@ -427,7 +440,12 @@ export function renderTakesFence(takes: ParsedTake[]): string {
     const resolved   = t.resolvedAt       ? safe(t.resolvedAt)              : '';
     const quality    = t.resolvedQuality  ?? '';
     const evidence   = t.resolvedEvidence ? safe(t.resolvedEvidence)        : '';
-    const value      = t.resolvedValue !== undefined ? formatWeight(t.resolvedValue) : '';
+    // F3: resolvedValue is an UNBOUNDED measured value (usd/count/pct), NOT a
+    // weight on the 0..1 grid. formatWeight's 2-decimal round would diverge md
+    // from the DB (12345.678 → 12345.68). Render it full-precision. Only the
+    // weight cell (`w` above) stays on formatWeight; `value` is the sole
+    // numeric resolution cell.
+    const value      = t.resolvedValue !== undefined ? String(t.resolvedValue) : '';
     const unit       = t.resolvedUnit     ? safe(t.resolvedUnit)            : '';
     const by         = t.resolvedBy       ? safe(t.resolvedBy)              : '';
     return `${baseCells} ${resolved} | ${quality} | ${evidence} | ${value} | ${unit} | ${by} |`;
@@ -549,6 +567,10 @@ export function supersedeRow(
  * unchanged.
  */
 export function stripTakesFence(body: string): string {
+  // Pages without a compiled body (e.g. metadata-only rows from a read op)
+  // have nothing to strip. Guard so the privacy strip is a safe no-op rather
+  // than crashing on `undefined.indexOf`.
+  if (typeof body !== 'string') return body;
   const beginIdx = body.indexOf(TAKES_FENCE_BEGIN);
   if (beginIdx === -1) return body;
   const endIdx = body.indexOf(TAKES_FENCE_END, beginIdx + TAKES_FENCE_BEGIN.length);

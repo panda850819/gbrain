@@ -19,25 +19,32 @@
 import { execFileSync } from 'child_process';
 import { VERSION } from '../version.ts';
 import { getCliOptions } from '../core/cli-options.ts';
+import { isActionableDoctorSeverity, resolveDoctorSeverity, type DoctorSeverity } from '../core/doctor-categories.ts';
 
 /**
  * Resolve the gbrain binary + args for spawning subcommands from
  * within skillpack-check. Handles three install cases:
- *   - Running the compiled binary (argv[1] ends in /gbrain): re-exec it.
+ *   - Running the compiled binary: process.execPath IS the real on-disk
+ *     binary — re-exec it. Checked before argv[1] (#4094): in a Bun
+ *     single-file compiled binary, argv[1] is the virtual bunfs path
+ *     `/$bunfs/root/gbrain`, which also ends in `/gbrain` but is not
+ *     spawnable (ENOENT). execPath never has this problem.
+ *   - argv[1] ends in /gbrain (e.g. a `gbrain` shim script on $PATH,
+ *     where execPath points at the bun runtime instead): re-exec argv[1].
  *   - Running via `bun run src/cli.ts` (argv[1] is a .ts file): prefix with `bun run`.
  *   - Anything else: fall back to `which gbrain` on $PATH.
  */
 function gbrainSpawn(): { cmd: string; prefix: string[] } {
+  const execPath = process.execPath ?? '';
+  if (execPath.endsWith('/gbrain') || execPath.endsWith('\\gbrain.exe')) {
+    return { cmd: execPath, prefix: [] };
+  }
   const arg1 = process.argv[1] ?? '';
   if (arg1.endsWith('/gbrain') || arg1.endsWith('\\gbrain.exe')) {
     return { cmd: arg1, prefix: [] };
   }
   if (arg1.endsWith('.ts') || arg1.endsWith('.mjs') || arg1.endsWith('.js')) {
     return { cmd: 'bun', prefix: ['run', arg1] };
-  }
-  const execPath = process.execPath ?? '';
-  if (execPath.endsWith('/gbrain') || execPath.endsWith('\\gbrain.exe')) {
-    return { cmd: execPath, prefix: [] };
   }
   return { cmd: 'gbrain', prefix: [] };
 }
@@ -46,6 +53,7 @@ interface DoctorCheck {
   name: string;
   status: 'ok' | 'warn' | 'fail';
   message: string;
+  severity?: DoctorSeverity;
   issues?: unknown[];
 }
 
@@ -142,7 +150,8 @@ function buildReport(): SkillpackReport {
   // Gather actions from doctor failures.
   if ('checks' in doctor) {
     for (const check of doctor.checks) {
-      if (check.status === 'fail') {
+      const severity = resolveDoctorSeverity(check);
+      if (severity === 'fail') {
         healthy = false;
         // Extract remediation command from check message if it follows
         // the `... Run: <cmd>` convention. Otherwise include the whole
@@ -150,7 +159,7 @@ function buildReport(): SkillpackReport {
         const runMatch = check.message.match(/Run:\s*(.+)$/);
         if (runMatch) actions.push(runMatch[1].trim());
         else actions.push(`[${check.name}] ${check.message}`);
-      } else if (check.status === 'warn') {
+      } else if (isActionableDoctorSeverity(severity)) {
         // Warnings don't fail the report but surface as informational
         // actions the agent can decide about.
         const runMatch = check.message.match(/Run:\s*(.+)$/);
@@ -193,16 +202,19 @@ export async function runSkillpackCheck(args: string[]): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
     console.log(`gbrain skillpack-check — agent-readable health report.
 
-Wraps doctor + apply-migrations --list into one JSON blob. Cron-friendly:
-zero interactive prompts, non-zero exit on any needed action.
+Wraps doctor + apply-migrations --list into one JSON blob.
 
 Usage:
-  gbrain skillpack-check            Pretty JSON to stdout, exit 0/1/2.
+  gbrain skillpack-check            Pretty JSON to stdout, exit 0/1/2 (legacy).
+  gbrain skillpack check            v0.33 subcommand. Default: informational
+                                     (exit 0 even with drift). Pass --strict
+                                     to exit non-zero on action-needed.
   gbrain skillpack-check --quiet    Exit code only, no output.
 
 Exit codes:
-  0  healthy (no action needed)
-  1  action needed (see JSON.actions[])
+  0  healthy (no action needed) — or informational mode with drift detected
+  1  action needed (see JSON.actions[]). Always returned when --strict OR
+     when invoked as top-level \`skillpack-check\` (cron compat).
   2  could not determine (binary or subcommand crash)
 `);
     return;
@@ -211,18 +223,52 @@ Exit codes:
   // --quiet is parsed as a global flag in src/cli.ts (and stripped from argv
   // before reaching here); honor it via the CliOptions singleton.
   const quiet = getCliOptions().quiet;
+  const strict = args.includes('--strict');
   const report = buildReport();
 
   if (!quiet) {
     console.log(JSON.stringify(report, null, 2));
   }
 
-  // Determine exit code.
+  // Crash-detection always trumps strict/informational toggles.
   if ('error' in report.doctor || 'error' in report.migrations) {
     process.exit(2);
+  }
+
+  // v0.33: When invoked as the new `gbrain skillpack check` subcommand,
+  // the dispatcher detects this via process.argv and treats the default
+  // as informational (exit 0 even with drift). Pass --strict to opt
+  // back into action-needed exit-1 semantics for CI gates.
+  //
+  // Top-level `gbrain skillpack-check` (cron compat) keeps exit-1 on
+  // action-needed as the default — see argv detection below.
+  const isSubcommandInvocation = isSkillpackCheckSubcommand();
+  const informational = isSubcommandInvocation && !strict;
+
+  if (informational) {
+    process.exit(0);
   }
   process.exit(report.healthy ? 0 : 1);
 }
 
+/**
+ * Detect whether this invocation came via `gbrain skillpack check`
+ * (subcommand) vs the top-level `gbrain skillpack-check` (cron compat).
+ * Subcommand → informational default. Top-level → strict default.
+ */
+function isSkillpackCheckSubcommand(): boolean {
+  const argv = process.argv;
+  // argv shape for `gbrain skillpack check` after the binary name and
+  // any --quiet / --json globals stripped: ['skillpack', 'check', ...].
+  // Walk to find the first non-flag arg.
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === 'skillpack') return true;
+    if (a === 'skillpack-check') return false;
+    if (a && !a.startsWith('--')) return false;
+  }
+  return false;
+}
+
 /** Exported for unit tests. */
-export const __testing = { buildReport, runDoctor, runMigrationsList };
+export const __testing = { buildReport, runDoctor, runMigrationsList, gbrainSpawn };

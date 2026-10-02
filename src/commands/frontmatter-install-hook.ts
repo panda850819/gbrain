@@ -39,7 +39,7 @@ if ! command -v gbrain >/dev/null 2>&1; then
   exit 0
 fi
 
-staged=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\\\\.mdx?$' || true)
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\\.mdx?$' || true)
 [ -z "$staged" ] && exit 0
 
 failed=0
@@ -158,7 +158,16 @@ async function listSources(engine: BrainEngine, sourceId?: string): Promise<Sour
   if (sourceId) {
     return engine.executeRaw<SourceRow>(`SELECT id, local_path FROM sources WHERE id = $1`, [sourceId]);
   }
-  return engine.executeRaw<SourceRow>(`SELECT id, local_path FROM sources WHERE local_path IS NOT NULL ORDER BY id`);
+  // #3880: all-source hook installation skips archived sources (v34 legacy
+  // fallback, house style per pickSoleNonDefaultSource). Explicit --source
+  // targeting above stays deliberate.
+  try {
+    return await engine.executeRaw<SourceRow>(
+      `SELECT id, local_path FROM sources WHERE local_path IS NOT NULL AND archived IS NOT TRUE ORDER BY id`,
+    );
+  } catch {
+    return engine.executeRaw<SourceRow>(`SELECT id, local_path FROM sources WHERE local_path IS NOT NULL ORDER BY id`);
+  }
 }
 
 function isGitRepo(dir: string): boolean {
