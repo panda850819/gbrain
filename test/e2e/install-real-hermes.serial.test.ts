@@ -209,7 +209,14 @@ function registerGbrainIntoHermes(
 describe.skipIf(!CAN_RUN)('install real-hermes door (serial e2e)', () => {
   test('version pin: hermes --version matches HERMES_VERSION when the CI pin is set', () => {
     const pinned = SAVED_ENV.HERMES_VERSION ?? process.env.HERMES_VERSION;
-    const res = runHermes(trackHome('ver'), ['--version']);
+    const home = trackHome('ver');
+    // A fresh HERMES_HOME borrows the installed checkout; `--version` refuses
+    // ("no dependency environment is committed") until the borrowing root's
+    // dependency environment exists. Other commands prepare it lazily;
+    // `pm repair` does so explicitly (observed v0.21.6).
+    const repair = runHermes(home, ['pm', 'repair']);
+    expect(repair.code).toBe(0);
+    const res = runHermes(home, ['--version']);
     expect(res.code).toBe(0);
     if (pinned) {
       expect(res.stdout).toContain(`v${pinned}`);

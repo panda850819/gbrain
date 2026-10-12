@@ -205,12 +205,15 @@ jobs:
       # together, deliberately, after reviewing upstream changes. The digest
       # pins the INSTALLER SCRIPT; the tag + commit pin the PAYLOAD it clones
       # (without them, the installer pulls upstream main into the runner that
-      # later holds secrets). The commit is v2026.8.3's dereferenced SHA —
-      # immutable even if the tag moves.
-      HERMES_VERSION: "0.20.0"
-      HERMES_GIT_TAG: "v2026.8.3"
-      HERMES_GIT_COMMIT: "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"
-      HERMES_INSTALL_SHA256: "2076946edc23b3aed4a82ccb2e6b38ab593575626206dbdd192384e375b6d57c"
+      # later holds secrets). The commit is v0.21.6's dereferenced SHA —
+      # immutable even if the tag moves. The installer requires --commit to be
+      # an ancestor of origin/<--branch>, which a tag has no ref for, so the
+      # clone branch is `main` and the tag is asserted against the checkout.
+      HERMES_VERSION: "0.21.6"
+      HERMES_GIT_BRANCH: "main"
+      HERMES_GIT_TAG: "v0.21.6"
+      HERMES_GIT_COMMIT: "818c13be1dc4fd28987e1e881a9408224afd4535"
+      HERMES_INSTALL_SHA256: "034845e34289813ff5fb7fd3e071ec69f6b14aee8ba297a477b31dda6374cb86"
       GBRAIN_REAL_HERMES_E2E: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -252,12 +255,9 @@ jobs:
           fi
           for attempt in 1 2 3; do
             # --skip-browser --skip-computer-use: neither is needed by the
-            # door, and the computer-use sub-installer pipes an UNPINNED
-            # third-party script from raw.githubusercontent.com to bash — the
-            # one part of the install the sha256 + tag/commit pins don't
-            # cover. Skipping removes that surface entirely (review record in
-            # docs/mcp/HERMES-CLI-PIN.md).
-            if timeout 600 bash hermes-install.sh --skip-setup --non-interactive --skip-browser --skip-computer-use --branch "$HERMES_GIT_TAG" --commit "$HERMES_GIT_COMMIT"; then
+            # door; skipping keeps agent-browser/Chromium and cua-driver off
+            # the runner entirely (review record in docs/mcp/HERMES-CLI-PIN.md).
+            if timeout 600 bash hermes-install.sh --skip-setup --non-interactive --skip-browser --skip-computer-use --branch "$HERMES_GIT_BRANCH" --commit "$HERMES_GIT_COMMIT"; then
               # The branch/commit flags above are ASSERTED here, not trusted:
               # a shell installer that silently ignores unknown flags would
               # clone upstream main into a runner that later holds secrets.
@@ -265,6 +265,11 @@ jobs:
               actual_commit=$(git -C "$HOME/.hermes/hermes-agent" rev-parse HEAD 2>/dev/null || echo "no-git-checkout")
               if [ "$actual_commit" != "$HERMES_GIT_COMMIT" ]; then
                 echo "::error::hermes payload drift — installed checkout is $actual_commit, pinned $HERMES_GIT_COMMIT. Either the installer ignored its branch/commit flags or the layout moved from ~/.hermes/hermes-agent; re-pin deliberately (HERMES_GIT_TAG/HERMES_GIT_COMMIT + docs/mcp/HERMES-CLI-PIN.md) after reviewing upstream." >&2
+                exit 1
+              fi
+              tag_commit=$(git -C "$HOME/.hermes/hermes-agent" rev-parse -q --verify "refs/tags/$HERMES_GIT_TAG^{commit}" || echo "no-such-tag")
+              if [ "$tag_commit" != "$HERMES_GIT_COMMIT" ]; then
+                echo "::error::hermes release-tag drift — $HERMES_GIT_TAG resolves to $tag_commit, pinned $HERMES_GIT_COMMIT; re-pin deliberately (HERMES_GIT_TAG/HERMES_GIT_COMMIT + docs/mcp/HERMES-CLI-PIN.md) after reviewing upstream." >&2
                 exit 1
               fi
               echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -287,7 +292,7 @@ jobs:
           fi
           version_output=$(hermes --version)
           echo "$version_output"
-          # Observed shape: `Hermes Agent v0.20.0 (2026.8.3)`. Checked BEFORE
+          # Observed shape: `Hermes Agent v0.21.6 (2026.9.24) · upstream <sha>`. Checked BEFORE
           # the secret gate so version drift is caught even on secretless PRs.
           if ! printf '%s' "$version_output" | grep -qF "v$HERMES_VERSION"; then
             echo "::error::hermes version drift — expected v$HERMES_VERSION in: $version_output" >&2

@@ -1,53 +1,95 @@
-# Hermes CLI pin — observed behavior notes (v0.20.0)
+# Hermes CLI pin — observed behavior notes (v0.21.6)
 
 Dev-facing companion to [HERMES.md](HERMES.md): every fact below was OBSERVED
-against a real install (2026-08-12), not researched from docs. The claw-test
-HermesRunner, the install door e2e, and the heavy-tests hermes-door CI job
-assert exactly these shapes — when hermes releases change them, update this
-file, the workflow pins, and the affected assertions together.
+against a real install (re-observed 2026-10-12 against the v0.21.6 pin), not
+researched from docs. The claw-test HermesRunner, the install door e2e, and the
+heavy-tests hermes-door CI job assert exactly these shapes — when hermes
+releases change them, update this file, the workflow pins, and the affected
+assertions together.
 
 ## Pin
-- **Hermes Agent v0.20.0 (2026.8.3)**, observed against git checkout `3e09adb` at
-  `~/.hermes/hermes-agent` (an upstream-main commit carrying the same v0.20.0/2026.8.3
-  version stamp; CI installs the RELEASE TAG `v2026.8.3` = commit `3c27eb62` — the two
-  differ by post-release main commits, same declared version. If a CI door run ever
-  diverges from these notes, re-observe against the tag checkout.)
-- Installer sha256: `2076946edc23b3aed4a82ccb2e6b38ab593575626206dbdd192384e375b6d57c`
-  (refreshed 2026-08-31: upstream drifted past the 2026-08-28 pin `4b5839eb…`
-  by exactly 4 commits touching `scripts/install.sh` (the served file;
-  matched byte-for-byte against the upstream repo at `a071fc80d`). Full
-  62-line diff reviewed: (1) Node support gate tightens 24.x → 24.11+
-  (version arithmetic only); (2) new `run_locked_uv_sync` helper — re-enables
-  PROJECT `[tool.uv]` config discovery for the Tier-0 locked sync in a
-  subshell while redirecting user/system uv config to an empty XDG dir, so
-  `uv sync --locked` is hash-verified again instead of falling through to
-  the non-hash-verified PyPI tiers (security-positive; the project config it
-  discovers comes from OUR tag+commit-pinned checkout); (3) default SOUL.md
-  prompt text rewrite (cosmetic, no exec). Outbound hosts and curl/wget
-  surfaces byte-identical to the prior pin; all five door flags
-  (`--skip-setup`/`--non-interactive`/`--skip-browser`/`--skip-computer-use`/
-  `--branch`/`--commit`) intact; unknown flags still hard-fail; payload pins
-  (tag+commit) unchanged.)
-  Prior record (2026-08-28 pin `4b5839eb…`, reviewed in full at 3,639 lines —
-  reviewed in full, all 3,639 lines: the `--skip-setup`/`--non-interactive`/
-  `--branch`/`--commit`/`--force-commit` flags the door depends on are intact
-  and unknown flags hard-fail (`exit 1`, so a dropped flag can never silently
-  skip the pin); outbound hosts remain the expected toolchain (github,
-  nousresearch, astral/uv, nodejs.org, pypi, npmmirror; plus a HEAD-only
-  duckduckgo connectivity probe); no eval/base64 obfuscation; sudo limited to
-  distro package installs (the one setuid chrome-sandbox sudo is
-  desktop-build-only, never in the door path); payload pins (tag+commit)
-  unchanged. KNOWN SURFACE, now REMOVED from the door: the computer-use
-  sub-installer pipes trycua/cua's installer from raw.githubusercontent.com
-  at unpinned `main` to bash — the door now passes `--skip-browser
-  --skip-computer-use`, so no unpinned code runs in CI. Behavioral notes:
-  non-root layout still `~/.hermes/hermes-agent` (root installs now use
-  FHS `/usr/local/lib/hermes-agent` — the door's runners are non-root);
-  npm-dep failures now abort the install, absorbed by the door's 3-attempt
-  retry; managed Node is now v26.)
-  (download https://hermes-agent.nousresearch.com/install.sh to a file first; verify; then run)
-- Installer flags used: `--skip-setup --non-interactive`; binary lands at `~/.local/bin/hermes`
-- Python 3.11.15 via uv
+- **Hermes Agent v0.21.6 (2026.9.24)** — release tag `v0.21.6` = commit
+  `818c13be1dc4fd28987e1e881a9408224afd4535` (on upstream `main`), installed at
+  `~/.hermes/hermes-agent`. Upstream moved release tags from CalVer
+  (`v2026.8.3`) to semver (`v0.21.6`); the CalVer date survives as the
+  parenthesized release date in `--version`.
+- Installer sha256: `034845e34289813ff5fb7fd3e071ec69f6b14aee8ba297a477b31dda6374cb86`
+  (re-pinned 2026-10-12; byte-identical to upstream `scripts/install.sh` at
+  `dcabf7631`, 1,049 lines). Download https://hermes-agent.nousresearch.com/install.sh
+  to a file first; verify; then run.
+- Installer flags used: `--skip-setup --non-interactive --skip-browser
+  --skip-computer-use --branch main --commit <sha>`; the launcher lands at
+  `~/.local/bin/hermes` (a two-line `sh` wrapper that execs
+  `~/.hermes/hermes-agent/.hermes/bin/hermes`).
+- Runtime: PM-managed Python 3.14.7, Node 26.7.0, uv 0.12.3, all under
+  `~/.hermes/tools/`.
+
+### Installer review record (2026-10-12: `2076946e…` → `034845e3…`)
+The prior pin (upstream `0610291b`, 3,678 lines) drifted by 79 upstream commits
+to `scripts/install.sh`. This is a REWRITE, not an incremental change: the
+installer became a thin bootstrap (clone → pinned uv → bootstrap Python) that
+hands everything else to code inside the cloned checkout —
+`python -m pm.cli install` (the new in-repo package manager) and
+`hermes_cli/source_completion.py` (command publication + product builds, the
+same tail `hermes update` runs). Full new script reviewed line by line; the
+diff against the old pin was reviewed by section.
+
+- **Door flags: all intact.** `--branch`/`--commit`/`--skip-browser`/
+  `--skip-computer-use`/`--skip-setup`/`--non-interactive` still parse;
+  `--skip-setup` is now an alias for `--non-interactive`. The skip flags became
+  PM's persisted opt-outs (`pm install --without agent-browser --without
+  cua-driver`); observed: no browser or cua-driver artifacts land in
+  `~/.hermes/tools/`. Unknown flags still hard-fail (`exit 1`); a value flag
+  with a missing or dash-leading value fails with `exit 2`. Removed flags
+  (unused by the door): `--no-venv`, `--no-skills`, `--force-commit`, `--ensure`.
+- **Layout: unchanged for the door.** `INSTALL_DIR` defaults to
+  `$HERMES_HOME/hermes-agent` = `~/.hermes/hermes-agent`; the root-only FHS
+  layout (`/usr/local/lib/hermes-agent`) is gone.
+- **BREAKING for the old pin — the payload pin had to move.** (1) The new
+  installer reads `pm/lock.json` and runs `pm.cli` + `source_completion.py`
+  from the checkout; none exist at the old payload `v2026.8.3`/`3c27eb62`
+  (PM landed 2026-08-29), so the old payload cannot be installed by the
+  current installer. (2) A pinned fresh clone now verifies
+  `git merge-base --is-ancestor <commit> origin/<branch>` before publishing; a
+  tag passed as `--branch` has no `origin/<tag>` ref, so it hard-fails
+  (observed: `commit … is not on branch v0.21.6`). CI therefore clones
+  `--branch main --commit <release sha>` and additionally asserts
+  `refs/tags/$HERMES_GIT_TAG^{commit}` == the pinned commit.
+- **Network surface shrank.** Gone from the installer: astral's `curl | sh`
+  uv bootstrap, direct nodejs.org / npmmirror / pypi fetches, the duckduckgo
+  connectivity probe, the unpinned trycua computer-use pipe from
+  raw.githubusercontent.com, and in-script distro `sudo` installs. The only
+  download left in the script is uv 0.12.3 from github.com/astral-sh releases,
+  sha256-verified against an inline generated pin table; a fallback to
+  `hermes-assets.nousresearch.com` (NEW host) is taken only on curl
+  network-class errors and is verified against the SAME digest. Every
+  artifact PM then fetches (node, npm, ffmpeg, ripgrep, python) is
+  sha256-pinned in `pm/lock.json` inside the commit-pinned checkout; Python
+  deps install via `uv.lock` (hash-verified), JS deps via `npm ci`. No
+  `eval`, no base64, no `curl | sh` anywhere in the script.
+- **Flagged for awareness (not blocking):**
+  - The installer digest now covers far less of the install logic — the real
+    trust anchor is the payload commit pin (+ the new tag assertion). Keep
+    re-pinning both together.
+  - `HERMES_REPO_URL` / `HERMES_INSTALL_DIR` / `HERMES_RUNTIME_DIR` env
+    overrides redirect the clone source / install dir / tool store. None are
+    set in the door job; never set them there.
+  - New local install receipt at
+    `$HERMES_HOME/telemetry/shared_metrics/pending_installs/<id>.json`
+    (closed tokens + two timestamps; the installer itself sends nothing).
+    Hermes only reports it while `telemetry.shared_metrics.enabled` is on,
+    and both `enabled` and `send` default to `false` at the pinned commit.
+  - `sudo`: interactive runs may `sudo -v` up front for libatomic; under
+    `--non-interactive` it only refreshes an existing ticket with `sudo -n -v`
+    (never prompts). PM may `sudo -n` install libatomic on a glibc host that
+    lacks it — GitHub's ubuntu runners ship it; not observed in the
+    rehearsal.
+- **Rehearsal:** the exact door command ran end-to-end under `env -i` (no
+  secrets) with an isolated `HOME`: exit 0, checkout HEAD = tag = pinned
+  commit, `hermes --version` → `Hermes Agent v0.21.6 (2026.9.24)`. The door
+  suite then ran against it: `--version`, `mcp add` handshake + saved config
+  + `mcp test`, and the direct-`config.yaml` test all pass; the paid SMOKE
+  leg reached Anthropic (401 on a dummy key — needs the real secret).
 
 ## HERMES_HOME — HONORED (verified)
 Installer (`HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"`) AND runtime both honor it:
@@ -55,12 +97,21 @@ Installer (`HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"`) AND runtime both honor
 populate `<tmp>/{SOUL.md,cron,logs,...}`, and do NOT touch `~/.hermes`. Belt-and-suspenders
 (HOME + HERMES_HOME both to tmp) stays in the door test anyway.
 
+**Borrowed data root (v0.21.6).** Dependency state is per data root, so a fresh
+`HERMES_HOME=<tmp>` "borrows" the installed checkout: most commands lazily
+prepare `<tmp>`'s dependency environment on first run (stderr: `preparing
+dependencies for this data root (the checkout's updates belong to …)`), but the
+`--version` / `-h` fast path instead exits 1 with `no dependency environment is
+committed for this install; run 'hermes pm repair'`. The door's version test
+runs `hermes pm repair` (exit 0, a few seconds) in its fresh home first.
+
 ## One-shot (`-z`)
 - `hermes -z "<prompt>"` → **stdout = final text ONLY**; benign notices may appear on stderr
   ("Shell cwd was reset to ..."). Verified reply fidelity ("B0-PROBE-OK").
-- Exit codes: 0 = success; **1 = no inference provider configured** (message: "agent failed:
-  No inference provider configured. Run 'hermes model' ... or set an API key
-  (OPENROUTER_API_KEY, OPENAI_API_KEY, etc.) in ~/.hermes/.env.")
+- Exit codes: 0 = success; **1 = no inference provider configured** (message:
+  "agent failed: Hermes is not connected to any AI provider yet. Run `hermes model` ...
+  or add a key with `hermes auth add <provider>`."); **2 = provider rejected the key**
+  (e.g. "Anthropic rejected your API key ... HTTP 401: invalid x-api-key").
 - `--usage-file PATH` exists; per-call `-m MODEL --provider PROVIDER` exist; also
   `--in DIR`, `--ignore-user-config`, `--safe-mode`, `-t TOOLSETS`, `--skills`.
 
@@ -91,7 +142,7 @@ populate `<tmp>/{SOUL.md,cron,logs,...}`, and do NOT touch `~/.hermes`. Belt-and
 
 ## Saved config schema (verbatim shape)
 ```yaml
-_config_version: 34
+_config_version: 50
 mcp_servers:
   gbrain:
     command: bun
@@ -117,17 +168,21 @@ mcp_servers:
 non-interactive. `hermes cron tick` = run due jobs once and exit. `hermes cron list` exists.
 
 ## CI pin values (heavy-tests.yml `hermes-door` job)
-- `HERMES_VERSION: "0.20.0"`
-- `HERMES_GIT_TAG: "v2026.8.3"` + `HERMES_GIT_COMMIT: "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"` —
+- `HERMES_VERSION: "0.21.6"`
+- `HERMES_GIT_BRANCH: "main"` + `HERMES_GIT_TAG: "v0.21.6"` +
+  `HERMES_GIT_COMMIT: "818c13be1dc4fd28987e1e881a9408224afd4535"` —
   the installer's `--branch`/`--commit` flags pin the cloned PAYLOAD (the sha256 below only
-  pins the installer script; without the tag+commit the payload would be upstream main).
-  The flags are asserted, not trusted: post-install the job runs
-  `git -C ~/.hermes/hermes-agent rev-parse HEAD` and loud-fails on any mismatch, so an
-  installer that silently ignores unknown flags (or a moved checkout layout) can never
-  run unpinned upstream code on a runner that later holds secrets.
-- `HERMES_INSTALL_SHA256: "c0380bc1f78d3d662a77663ce20cc17e14cbc4bec35e61ab7a33bac5f3afed2d"`
+  pins the installer script; without the commit the payload would be upstream main).
+  `--branch` is `main`, not the tag, because the installer requires the commit to be an
+  ancestor of `origin/<branch>`. The pins are asserted, not trusted: post-install the job
+  checks `git -C ~/.hermes/hermes-agent rev-parse HEAD` == the commit AND
+  `refs/tags/$HERMES_GIT_TAG^{commit}` == the commit, loud-failing on any mismatch, so an
+  installer that silently ignores flags (or a moved checkout layout, or a moved tag) can
+  never run unpinned upstream code on a runner that later holds secrets.
+- `HERMES_INSTALL_SHA256: "034845e34289813ff5fb7fd3e071ec69f6b14aee8ba297a477b31dda6374cb86"`
 - Door test asserts `hermes --version` output contains `v$HERMES_VERSION` when the env var is set.
-- `hermes --version` output shape: `Hermes Agent v0.20.0 (2026.8.3)` + install dir + python lines.
+- `hermes --version` output shape: `Hermes Agent v0.21.6 (2026.9.24) · upstream <sha>` + install
+  dir, install method, Python, OpenAI SDK lines (+ an `Update available` line when main has moved).
 - Missing-secret posture is SPLIT by trigger: on `pull_request` the paid leg is
   a VISIBLE SKIP (warning + job summary; installer digest, payload, and version
   pins still verified — neither a fork nor a branch PR author can fix repo

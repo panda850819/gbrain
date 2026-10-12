@@ -115,6 +115,6 @@ brain maintenance protocol (sync, embed, dream cycle).
 
 ---
 
-Documented against **Hermes Agent v0.20.0 (2026.8.3)**. Dev-facing observed-behavior
+Documented against **Hermes Agent v0.21.6 (2026.9.24)**. Dev-facing observed-behavior
 notes (exact flag semantics, exit-code caveats, CI pin values) live in
 [HERMES-CLI-PIN.md](HERMES-CLI-PIN.md).
