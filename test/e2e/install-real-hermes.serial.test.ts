@@ -9,15 +9,17 @@
  * heavy-tests.yml), nor (b) an agent FOLLOWING INSTALL_FOR_AGENTS.md
  * end-to-end (guide-following is the claw-test live lane's job).
  *
- * GATING (fail-SKIP, never fail-hard): requires ALL of
- *   - GBRAIN_REAL_HERMES_E2E=1  — explicit opt-in. This file matches the
- *     ordinary test/e2e glob, and unlike the claude/codex doors (whose auth
- *     probes die with a redirected HOME) an env-key auth gate alone would fire
- *     paid multi-minute turns on any dev box with hermes + a key. CI's
+ * GATING (fail-SKIP, never fail-hard), two tiers:
+ *   - keyless tier (version pin, `mcp add` handshake, direct config.yaml)
+ *     requires GBRAIN_REAL_HERMES_E2E=1 — explicit opt-in. This file matches
+ *     the ordinary test/e2e glob, and unlike the claude/codex doors (whose
+ *     auth probes die with a redirected HOME) an env-key auth gate alone would
+ *     fire paid multi-minute turns on any dev box with hermes + a key. CI's
  *     hermes-door job and provisioned boxes set the var deliberately;
  *     run-e2e.sh scrubs GBRAIN_* so this suite structurally cannot fire there.
- *   - a resolvable hermes binary
- *   - hermes auth with a NON-EMPTY provider key (blank CI secret ⇒ skip)
+ *     Plus a resolvable hermes binary.
+ *   - paid tier (the SMOKE turn) additionally requires a NON-EMPTY anthropic
+ *     key (blank CI secret ⇒ the paid tier skips; the keyless tier still runs)
  *
  * Isolation: every child gets BOTH HOME=<tmp> and HERMES_HOME=<tmp>/.hermes
  * (HERMES_HOME honoring verified against v0.20.0; the double-set covers either
@@ -63,15 +65,16 @@ import {
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const CLI = join(REPO_ROOT, 'src', 'cli.ts');
 const HERMES_BIN = resolveHermesBinary();
-const CAN_RUN = process.env.GBRAIN_REAL_HERMES_E2E === '1' && !!HERMES_BIN && hasHermesAuth();
+const CAN_RUN_KEYLESS = process.env.GBRAIN_REAL_HERMES_E2E === '1' && !!HERMES_BIN;
+const CAN_RUN_PAID = CAN_RUN_KEYLESS && hasHermesAuth();
 
-if (!CAN_RUN) {
+if (!CAN_RUN_KEYLESS) {
   const why = process.env.GBRAIN_REAL_HERMES_E2E !== '1'
     ? 'GBRAIN_REAL_HERMES_E2E is not 1 (explicit opt-in required — paid agent turns)'
-    : !HERMES_BIN
-      ? 'hermes binary not found'
-      : 'no non-empty hermes provider key (env or ~/.hermes/.env)';
-  console.warn(`[install-real-hermes] SKIP: ${why}`);
+    : 'hermes binary not found';
+  console.warn(`[install-real-hermes] SKIP (keyless tier): ${why}`);
+} else if (!CAN_RUN_PAID) {
+  console.warn('[install-real-hermes] keyless tier runs; SKIP paid tier: no non-empty ANTHROPIC_API_KEY (env or ~/.hermes/.env)');
 }
 
 const ENV_KEYS = [
@@ -206,10 +209,17 @@ function registerGbrainIntoHermes(
   ], 'Y\n');
 }
 
-describe.skipIf(!CAN_RUN)('install real-hermes door (serial e2e)', () => {
+describe.skipIf(!CAN_RUN_KEYLESS)('install real-hermes door — keyless tier (serial e2e)', () => {
   test('version pin: hermes --version matches HERMES_VERSION when the CI pin is set', () => {
     const pinned = SAVED_ENV.HERMES_VERSION ?? process.env.HERMES_VERSION;
-    const res = runHermes(trackHome('ver'), ['--version']);
+    const home = trackHome('ver');
+    // A fresh HERMES_HOME borrows the installed checkout; `--version` refuses
+    // ("no dependency environment is committed") until the borrowing root's
+    // dependency environment exists. Other commands prepare it lazily;
+    // `pm repair` does so explicitly (observed v0.21.6).
+    const repair = runHermes(home, ['pm', 'repair']);
+    expect(repair.code).toBe(0);
+    const res = runHermes(home, ['--version']);
     expect(res.code).toBe(0);
     if (pinned) {
       expect(res.stdout).toContain(`v${pinned}`);
@@ -289,7 +299,9 @@ describe.skipIf(!CAN_RUN)('install real-hermes door (serial e2e)', () => {
     const doctor = runHermes(home, ['doctor']);
     console.warn(`[install-real-hermes] doctor (evidence only): exit ${doctor.code}`);
   }, 300_000);
+});
 
+describe.skipIf(!CAN_RUN_PAID)('install real-hermes door — paid tier (anthropic, serial e2e)', () => {
   test('SMOKE: real hermes -z answers the seeded fact through the gbrain MCP server', async () => {
     const home = trackHome('smoke');
     const seeded = await seedBrainForAgent(home, 'workspace');

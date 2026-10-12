@@ -216,7 +216,7 @@ export const resolveHermesBinary = makeBinaryResolver({
   candidates: (home) => [
     '/opt/homebrew/bin/hermes',
     '/usr/local/bin/hermes',
-    `${home}/.local/bin/hermes`, // where the official installer symlinks (observed v0.20.0)
+    `${home}/.local/bin/hermes`, // where the official installer publishes its launcher (observed v0.21.6)
     `${home}/.hermes/bin/hermes`,
   ],
   pathSweep: true,
