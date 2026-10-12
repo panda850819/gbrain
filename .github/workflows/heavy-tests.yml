@@ -188,10 +188,12 @@ jobs:
   # non-interactive auth + model pin — and then requires the door tests to
   # actually execute. It pays real API cost, so it stays label-gated at heavy
   # cadence (nightly + `real-agent-e2e`/`heavy-tests` label + dispatch); NEVER
-  # the PR shard matrix. Loud-fail throughout: a runner that cannot install or
-  # auth hermes fails this job rather than skipping.
+  # the PR shard matrix. KEYLESS-FIRST: install, pins, and the keyless tier
+  # (version, `mcp add` handshake, direct config) always run and fail loudly;
+  # only the paid SMOKE tier is skipped — visibly, never silently green — when
+  # the ANTHROPIC_API_KEY secret is empty (owner decision: it is not set).
   hermes-door:
-    name: Hermes door e2e (real binary, loud-fail)
+    name: Hermes door e2e (real binary, keyless-first)
     if: |
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'real-agent-e2e') ||
@@ -281,10 +283,7 @@ jobs:
           echo "::error::hermes install failed after 3 attempts" >&2
           exit 1
 
-      - name: Preconditions (binary, secret, version pin)
-        id: paidgate
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Preconditions (binary, version pin)
         run: |
           if ! command -v hermes >/dev/null 2>&1; then
             echo "::error::hermes did not resolve on PATH after install" >&2
@@ -292,31 +291,55 @@ jobs:
           fi
           version_output=$(hermes --version)
           echo "$version_output"
-          # Observed shape: `Hermes Agent v0.21.6 (2026.9.24) · upstream <sha>`. Checked BEFORE
-          # the secret gate so version drift is caught even on secretless PRs.
+          # Observed shape: `Hermes Agent v0.21.6 (2026.9.24) · upstream <sha>`.
           if ! printf '%s' "$version_output" | grep -qF "v$HERMES_VERSION"; then
             echo "::error::hermes version drift — expected v$HERMES_VERSION in: $version_output" >&2
             exit 1
           fi
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            # Split posture: schedule/dispatch stay LOUD-FAIL — the owner is
-            # the audience there and owns the secret. A pull_request run's
-            # audience is a PR author who cannot fix repo secrets (fork PRs
-            # never receive them at all), and a permanently-red check trains
-            # reviewers to ignore this door — so on PRs the missing paid leg
-            # is a VISIBLE SKIP (warning + job summary), never a silent green.
-            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-              echo "paid=false" >> "$GITHUB_OUTPUT"
-              echo "::warning::hermes door PAID LEG SKIPPED — ANTHROPIC_API_KEY secret is empty (owner-only fix: gh secret set ANTHROPIC_API_KEY). Installer digest + payload + version pins verified; no hermes turn ran." >&2
-              {
-                echo "## Hermes door: paid leg skipped"
-                echo "ANTHROPIC_API_KEY secret is empty — installer digest, payload, and version pins verified, but no hermes turn ran."
-                echo "The nightly schedule stays loud-fail until the owner sets the secret."
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            echo "::error::ANTHROPIC_API_KEY secret is empty — this scheduled/dispatched run cannot cover the hermes door without it (owner-only fix: gh secret set ANTHROPIC_API_KEY)" >&2
+
+      # KEYLESS TIER FIRST, with no secret in the step env and no ~/.hermes/.env
+      # yet, so the paid describe self-skips. Runs on every trigger and fails
+      # normally — a missing key never hides an install/MCP regression.
+      - name: Run hermes door tests (keyless tier)
+        run: |
+          # Redirect to a file, then tail — never pipe bun through tail (the
+          # pipe eats the real exit code and truncates failure details).
+          # `|| EXIT=$?` keeps the default `-e` shell from bailing before the
+          # tail runs.
+          EXIT=0
+          bun test --timeout=600000 test/e2e/install-real-hermes.serial.test.ts > door-keyless.txt 2>&1 || EXIT=$?
+          tail -40 door-keyless.txt
+          cp door-keyless.txt "$GBRAIN_E2E_EVIDENCE_DIR/" 2>/dev/null || true
+          if [ "$EXIT" -ne 0 ]; then
+            exit "$EXIT"
+          fi
+          # Exact expected shape for this tier: 3 keyless tests pass (version
+          # pin, INSTALL, INSTALL 1b), the 1 paid test skips. Zero/partial-pass
+          # refuses green.
+          pass_count=$(grep -Eo '[0-9]+ pass' door-keyless.txt | tail -1 | grep -Eo '^[0-9]+' || true)
+          if [ -z "$pass_count" ] || [ "$pass_count" -lt 3 ]; then
+            echo "::error::hermes door keyless tier expected 3 passing tests, summary shows '${pass_count:-none}' — refusing to go green while testing nothing" >&2
             exit 1
+          fi
+
+      # Owner decision: the ANTHROPIC_API_KEY secret is not set, so on every
+      # trigger an empty key is a VISIBLE SKIP of the paid tier (warning + job
+      # summary), never a failure and never a silent green. Everything that
+      # does not need the key ran above and failed normally.
+      - name: Paid-tier gate (ANTHROPIC_API_KEY)
+        id: paidgate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "paid=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::hermes door PAID TIER SKIPPED — ANTHROPIC_API_KEY secret is empty. Installer digest + payload + version pins and the keyless tier (3 tests) ran; the paid SMOKE turn did not." >&2
+            {
+              echo "## Hermes door: paid tier skipped (missing ANTHROPIC_API_KEY)"
+              echo "Installer digest, payload, and version pins verified; keyless tier (3 tests) passed."
+              echo "The paid SMOKE turn was skipped because the ANTHROPIC_API_KEY secret is empty."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           echo "paid=true" >> "$GITHUB_OUTPUT"
 
@@ -334,15 +357,11 @@ jobs:
           # Global health check — informational only, never a gate here.
           hermes doctor || true
 
-      - name: Run hermes door tests
+      - name: Run hermes door tests (full — paid SMOKE included)
         if: steps.paidgate.outputs.paid == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          # Redirect to a file, then tail — never pipe bun through tail (the
-          # pipe eats the real exit code and truncates failure details).
-          # `|| EXIT=$?` keeps the default `-e` shell from bailing before the
-          # tail runs.
           EXIT=0
           bun test --timeout=600000 test/e2e/install-real-hermes.serial.test.ts > door.txt 2>&1 || EXIT=$?
           tail -40 door.txt
@@ -355,13 +374,15 @@ jobs:
           if [ "$EXIT" -ne 0 ]; then
             exit "$EXIT"
           fi
-          # This job provisions the binary + auth above, so the door must
-          # actually EXECUTE: a summary with zero passing tests means the
-          # suite ran nothing or self-skipped everything — never let that
-          # read as green.
+          # PAID-SENTINEL: with the key present, a skipping paid tier must
+          # never read as green.
+          if grep -q 'SKIP paid tier' door.txt; then
+            echo "::error::hermes door paid tier skipped despite a present ANTHROPIC_API_KEY — hasHermesAuth() gate drift; refusing to go green" >&2
+            exit 1
+          fi
           pass_count=$(grep -Eo '[0-9]+ pass' door.txt | tail -1 | grep -Eo '^[0-9]+' || true)
-          if [ -z "$pass_count" ] || [ "$pass_count" -eq 0 ]; then
-            echo "::error::hermes door summary shows no passing tests (nothing ran or everything skipped) — refusing to go green while testing nothing" >&2
+          if [ -z "$pass_count" ] || [ "$pass_count" -lt 4 ]; then
+            echo "::error::hermes door full run expected 4 passing tests, summary shows '${pass_count:-none}' — refusing to go green" >&2
             exit 1
           fi
 
@@ -412,7 +433,7 @@ jobs:
   # pinned npm package (registry integrity verified — stronger than the
   # curl-installer path; both pins live in docs/mcp/GROK-CLI-PIN.md, enforced
   # against this file by scripts/check-grok-pin.sh in `bun run verify`).
-  # KEYLESS-FIRST ordering (deliberate divergence from hermes-door): grok's
+  # KEYLESS-FIRST ordering (same as hermes-door): grok's
   # mcp add/list/doctor run keyless, so the compat tier runs and banks its
   # coverage BEFORE the secret precondition — a missing XAI_API_KEY still
   # fails this job loudly, but only after the free tier proved the install
@@ -741,9 +762,9 @@ jobs:
   # DAY-ONE FULL POSTURE (a step past grok's pre-secret gating, deliberate):
   # opencode's anonymous free tier drives MCP tool calls keyless (observed,
   # load-bearing — OPENCODE-CLI-PIN.md §One-shot), so the ENTIRE core door —
-  # including the nonce SMOKE — runs with no secret; and the paid anthropic
-  # leg rides the ANTHROPIC_API_KEY secret that already exists (hermes-door
-  # consumes it). So this job takes the hermes-door triggers (nightly +
+  # including the nonce SMOKE — runs with no secret; the paid anthropic leg
+  # rides the ANTHROPIC_API_KEY secret and is a visible skip while that secret
+  # is empty (shared with hermes-door). So this job takes the hermes-door triggers (nightly +
   # labels + dispatch, cadence policy: nightly for the NEWEST door agent)
   # with grok-door's internals (keyless-first ordering, secretless pinned
   # provisioning, sentinels, scrub triple, unconditional credential removal).
@@ -866,31 +887,25 @@ jobs:
             exit 1
           fi
 
-      - name: Preconditions (secret present)
+      # Owner decision: the ANTHROPIC_API_KEY secret is not set, so on every
+      # trigger an empty key is a VISIBLE SKIP of the paid anthropic leg
+      # (warning + job summary), never a failure and never a silent green.
+      # The keyless tier above (incl. the SMOKE) already ran and failed
+      # normally.
+      - name: Paid-tier gate (ANTHROPIC_API_KEY)
         id: paidgate
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            # Keyless coverage (incl. the SMOKE) is already banked above.
-            # Split posture: on pull_request the missing paid leg is a
-            # VISIBLE SKIP (fork PRs never receive secrets, and branch-PR
-            # authors cannot fix repo secrets either — a permanently-red
-            # check just trains reviewers to ignore this door); the nightly
-            # schedule + dispatch stay loud-fail so the owner sees red until
-            # the secret exists.
-            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-              echo "paid=false" >> "$GITHUB_OUTPUT"
-              echo "::warning::opencode door PAID LEG SKIPPED — ANTHROPIC_API_KEY secret is empty (owner-only fix: gh secret set ANTHROPIC_API_KEY). Keyless tier (5 tests incl. the SMOKE) is banked above." >&2
-              {
-                echo "## opencode door: paid anthropic leg skipped"
-                echo "Keyless tier (5 tests, SMOKE included) passed; the paid leg needs the ANTHROPIC_API_KEY secret."
-                echo "The nightly schedule stays loud-fail until the owner sets the secret."
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            echo "::error::ANTHROPIC_API_KEY secret is empty — the keyless tier above already ran (its coverage, including the SMOKE, is banked); the paid anthropic leg needs the secret hermes-door already consumes (owner-only fix: gh secret set ANTHROPIC_API_KEY)." >&2
-            exit 1
+            echo "paid=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::opencode door PAID TIER SKIPPED — ANTHROPIC_API_KEY secret is empty. Keyless tier (5 tests incl. the SMOKE) ran above; the paid anthropic leg did not." >&2
+            {
+              echo "## opencode door: paid anthropic tier skipped (missing ANTHROPIC_API_KEY)"
+              echo "Keyless tier (5 tests, SMOKE included) passed."
+              echo "The paid anthropic leg was skipped because the ANTHROPIC_API_KEY secret is empty."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           echo "paid=true" >> "$GITHUB_OUTPUT"
 

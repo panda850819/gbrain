@@ -8,7 +8,7 @@
  * shape was observed against v1.0.4 — see docs/mcp/GROK-CLI-PIN.md; update
  * that file, the heavy-tests grok-door pins, and these assertions together.
  *
- * SPLIT GATING (divergence from the hermes door, deliberate): grok's mcp
+ * SPLIT GATING (same shape as the hermes door): grok's mcp
  * add/list/doctor all run KEYLESS (observed), so the compat tier needs only
  * the binary — missing auth must not discard it. Two describes:
  *   - keyless tier (T1 version pin, T2 INSTALL, T2b provenance, T3 direct

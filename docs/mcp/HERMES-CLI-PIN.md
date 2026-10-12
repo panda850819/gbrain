@@ -183,12 +183,17 @@ non-interactive. `hermes cron tick` = run due jobs once and exit. `hermes cron l
 - Door test asserts `hermes --version` output contains `v$HERMES_VERSION` when the env var is set.
 - `hermes --version` output shape: `Hermes Agent v0.21.6 (2026.9.24) · upstream <sha>` + install
   dir, install method, Python, OpenAI SDK lines (+ an `Update available` line when main has moved).
-- Missing-secret posture is SPLIT by trigger: on `pull_request` the paid leg is
-  a VISIBLE SKIP (warning + job summary; installer digest, payload, and version
-  pins still verified — neither a fork nor a branch PR author can fix repo
-  secrets, and a permanently-red door trains reviewers to ignore it). The
-  nightly schedule and `workflow_dispatch` stay loud-fail so the owner sees red
-  until `gh secret set ANTHROPIC_API_KEY` runs.
+- Tiers: the door suite is split like opencode's. The **keyless tier**
+  (`--version` pin, `mcp add` handshake + saved config + `mcp test`, direct
+  `config.yaml`) needs no provider key, runs on every trigger, and fails
+  normally; CI requires all 3 to pass. The **paid tier** (the `-z` SMOKE turn)
+  needs a non-empty `ANTHROPIC_API_KEY`.
+- Missing-secret posture (owner decision: the secret is not set): on EVERY
+  trigger — PR, nightly, dispatch — an empty key makes the paid tier a VISIBLE
+  SKIP (`::warning` + "paid tier skipped (missing ANTHROPIC_API_KEY)" job
+  summary), never a failure. Installer digest, payload, tag, and version pins
+  plus the keyless tier still run first. With the key present, the full run
+  must show 4 passes and no `SKIP paid tier` line.
 
 ## Multi-provider 401 gotcha (door hermeticity)
 With `model.default` pinned to `anthropic/*` but a SECOND provider key visible (env or
