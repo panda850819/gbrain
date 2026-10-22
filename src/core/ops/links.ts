@@ -1,4 +1,5 @@
 import { assertUnmanagedCanonicalWriter } from '../persistence/maintenance.ts';
+import { coordinatedManualLinkWrite } from '../persistence/manual-links.ts';
 /**
  * Links + graph operation cluster — pure move from operations.ts (v0.46.x
  * tranche 1). MANAGED_LINK_SOURCES stays exported (test suite + operations.ts
@@ -76,7 +77,6 @@ const add_link: Operation = {
       }
     }
     if (ctx.dryRun) return { dry_run: true, action: 'add_link', from: p.from, to: p.to };
-    await assertUnmanagedCanonicalWriter(ctx.engine, 'add_link');
     // v114 (#1941): default omitted provenance to 'manual' (NOT the engine's
     // 'markdown' default) so hand/tool-created CLI edges are honestly manual,
     // and forbid forging the reconciliation-managed built-ins.
@@ -97,7 +97,10 @@ const add_link: Operation = {
     await requireWritablePage(ctx, p.from as string, 'add_link', 'from');
     await requireWritablePage(ctx, p.to as string, 'add_link', 'to');
     try {
-      await ctx.engine.addLink( // gbrain-allow-direct-insert: add_link MCP op is the explicit canonical surface for manual link creation; auto-link reconciliation runs separately via auto_link post-hook
+      const managed = await coordinatedManualLinkWrite(ctx, 'add_link', p.from as string, p.to as string, (engine, sourceId) =>
+        engine.addLink(p.from as string, p.to as string, (p.context as string) || '', linkType, linkSource, undefined, undefined, // gbrain-allow-direct-insert: coordinated manual link inside withCoordinatedWrite
+          { fromSourceId: sourceId, toSourceId: sourceId, originSourceId: sourceId }));
+      if (!managed) await ctx.engine.addLink( // gbrain-allow-direct-insert: add_link MCP op is the explicit canonical surface for manual link creation; auto-link reconciliation runs separately via auto_link post-hook
         p.from as string, p.to as string,
         (p.context as string) || '', linkType,
         linkSource, undefined, undefined,
