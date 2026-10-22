@@ -32,8 +32,11 @@ import { enforceStoredFilingPolicy } from '../filing-policy.ts';
 
 const PURGE_RESIDUALS = 'Brain-repo git history, synced working-tree copies, exports, compiled context files and slug-keyed derived rows (takes, open loops, file records) may still hold the content — rotate the credential and rewrite or regenerate those copies.';
 
+// parseMarkdown trims body text, but stored bodies may keep trailing line ends
+// (a restored Facts fence appends one). Compare without them; bytes stay as-is.
+const bodyText = (text: string | null | undefined) => (text ?? '').replace(/(?:\r?\n)+$/, '');
 function canonical(page: Pick<Page, 'type' | 'title' | 'compiled_truth' | 'timeline' | 'frontmatter'>, tags: string[]) {
-  return { type: page.type, title: page.title, compiled_truth: page.compiled_truth, timeline: page.timeline ?? '',
+  return { type: page.type, title: page.title, compiled_truth: bodyText(page.compiled_truth), timeline: bodyText(page.timeline),
     frontmatter: page.frontmatter, tags: [...new Set(tags)].sort() };
 }
 interface CanonicalProvenance { source_kind: string; ingested_via: string; ingested_at: string; }
