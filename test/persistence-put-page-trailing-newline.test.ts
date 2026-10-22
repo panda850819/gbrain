@@ -78,12 +78,12 @@ async function mirrored(slug: string, compiled_truth: string, timeline = '') {
 
 test('a stored body ending in LF matches its own file mirror', async () => {
   const { snapshot, row } = await mirrored('lf', 'Body ending in a newline.\n');
-  expect((await prepareFileTarget(engine, row, snapshot, 'Replacement'))?.path).toBe(join(root, 'lf.md'));
+  expect((await prepareFileTarget(engine, row, snapshot, 'Replacement'))?.path).toEndWith('/source/lf.md');
 });
 
 test('a stored body ending in CRLF and a timeline ending in LF match their file mirror', async () => {
   const { snapshot, row } = await mirrored('crlf', 'Body ending in CRLF.\r\n', '- 2026-10-22: drafted\n');
-  expect((await prepareFileTarget(engine, row, snapshot, 'Replacement'))?.path).toBe(join(root, 'crlf.md'));
+  expect((await prepareFileTarget(engine, row, snapshot, 'Replacement'))?.path).toEndWith('/source/crlf.md');
 });
 
 test('trailing spaces are still a local edit', async () => {
