@@ -69,11 +69,21 @@ test('unregistered source lifecycle and unsupported legacy writers refuse before
         () => runGitHubSync(engine, sourceId, {} as never, {} as never),
         () => runGoogleSync(engine, sourceId, {} as never, {} as never),
         () => importFromContent(engine, 'blocked', 'canonical material', { sourceId, noEmbed: true }),
-        () => operationsByName.add_link!.handler({ engine, sourceId, remote: false, config: { engine: engine.kind }, dryRun: false,
-          logger: { info() {}, warn() {}, error() {} } }, { from: 'notes/example', to: 'notes/other' }),
         () => operationsByName.remove_link!.handler({ engine, sourceId, remote: false, config: { engine: engine.kind }, dryRun: false,
           logger: { info() {}, warn() {}, error() {} } }, { from: 'notes/example', to: 'notes/other' }),
       ]) await expect(work()).rejects.toMatchObject({ code: 'writer_coordinator_required' });
+      // A manual link lives only in the database, with no canonical file or
+      // receipt, so add_link needs no writer registration: it commits through
+      // the source-scoped coordinated transaction, which rechecks write
+      // authority on `from` and visibility of both endpoints after its locks.
+      await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
+        for (const slug of ['notes/example', 'notes/other']) {
+          await tx.putPage(slug, { type: 'note', title: slug, compiled_truth: slug }, { sourceId });
+        }
+      }));
+      await expect(operationsByName.add_link!.handler({ engine, sourceId, remote: false, config: { engine: engine.kind }, dryRun: false,
+        logger: { info() {}, warn() {}, error() {} } }, { from: 'notes/example', to: 'notes/other' })).resolves.toEqual({ status: 'ok' });
+      expect((await engine.getLinks('notes/example', { sourceId })).map(link => link.to_slug)).toEqual(['notes/other']);
       expect(readFileSync(join(root, 'sentinel.md'), 'utf8')).toBe('canonical sentinel');
       expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(1);
     }
