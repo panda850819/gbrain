@@ -121,7 +121,7 @@ const WORKER_SRC = `
 const { workerData } = require('node:worker_threads');
 const { deadlineMs, graceMs, label, heartbeatMs } = workerData;
 const t0 = Date.now();
-function w(m) { try { process.stderr.write('[' + label + '] ' + m + '\\n'); } catch (e) {} }
+function w(m) { try { require('fs').writeSync(2, '[' + label + '] ' + m + '\\n'); } catch (e) {} }
 if (heartbeatMs > 0) {
   const hb = setInterval(() => {
     const elapsed = Math.round((Date.now() - t0) / 1000);
@@ -352,7 +352,7 @@ const { stallMs, graceMs, label, checkIntervalMs } = workerData;
 let lastPet = Date.now();
 let lastCheck = Date.now();
 let latched = false;
-function w(m) { try { process.stderr.write('[' + label + '] ' + m + '\\n'); } catch (e) {} }
+function w(m) { try { require('fs').writeSync(2, '[' + label + '] ' + m + '\\n'); } catch (e) {} }
 if (parentPort) parentPort.on('message', () => { lastPet = Date.now(); });
 setInterval(() => {
   const now = Date.now();
