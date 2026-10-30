@@ -2500,7 +2500,7 @@ describe('#3583 review: GATE25 — the upgrade path for someone already wedged b
 describe('rename destination import: an errored skip must not checkpoint the rename as done', () => {
   test('a frontmatter slug-authority rejection at the destination is retried, never falsely checkpointed', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
-    const repo = mkRepo({ 'people/alpha.md': personMd('Alpha', 'Alpha is a person.') });
+    const repo = mkRepo({ 'people/alpha.md': personMd('Alpha', 'Alpha is a person.\n') });
     await performSync(engine, { repoPath: repo, ...SYNC_OPTS });
     expect(await engine.getPage('people/alpha')).not.toBeNull();
 
@@ -2512,10 +2512,12 @@ describe('rename destination import: an errored skip must not checkpoint the ren
     // git's similarity-based rename detection still classifies this as a
     // RENAME rather than a delete+add (a rewritten body drops similarity
     // below git's threshold and takes a completely different code path).
+    // Both files end in a newline: git 2.43 scores an unterminated final line
+    // as unshared, which drops this pair below the 50% rename threshold.
     execSync('git mv people/alpha.md people/beta.md', { cwd: repo, stdio: 'pipe' });
     writeFileSync(join(repo, 'people/beta.md'), [
       '---', 'type: person', 'title: Alpha', 'slug: totally-different', '---',
-      '', 'Alpha is a person.',
+      '', 'Alpha is a person.', '',
     ].join('\n'));
     execSync('git add -A && git commit -m "rename alpha to beta, corrupted frontmatter"', {
       cwd: repo, stdio: 'pipe',

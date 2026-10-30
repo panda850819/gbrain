@@ -62,7 +62,7 @@ describe('corpus integrity', () => {
     // the committed bytes on failure so a red run never leaves the tree dirty.
     const committed = readFileSync(corpusPath, 'utf8');
     try {
-      const out = execFileSync('node', ['evals/takes-bootstrap/generate-corpus.mjs'], { cwd: repoRoot, encoding: 'utf8' });
+      const out = execFileSync(process.execPath, ['evals/takes-bootstrap/generate-corpus.mjs'], { cwd: repoRoot, encoding: 'utf8' });
       expect(out).toContain('wrote');
       const regenerated = readFileSync(corpusPath, 'utf8');
       expect(regenerated).toBe(committed);
