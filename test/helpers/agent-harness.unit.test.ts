@@ -672,8 +672,26 @@ describe('diagnoseOpencodeTurn (pure — log shapes observed on v1.18.18)', () =
     const d = diagnoseOpencodeTurn({ finalText: '', exitCode: 124, timedOut: true }, LOG_STALLED);
     expect(d).toEqual({
       turnClass: 'startup_stall', exitCode: 124, timedOut: true,
-      stdoutEventCount: 0, sessionCreated: false, lastLogMessage: 'init',
+      stdoutEventCount: 0, sessionCreated: false, lastLogMessage: 'init', upstreamError: null,
     });
+  });
+
+  test('free-tier quota rejection in the log → free_quota, even though the run only timed out', () => {
+    const quota = [
+      LOG_STARTED,
+      'timestamp=2026-11-03T00:51:19.961Z level=ERROR run=6e09f9c8 message="stream error" providerID=opencode modelID=big-pickle error.error="AI_APICallError: Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go"',
+    ].join('\n');
+    const d = diagnoseOpencodeTurn({ finalText: '', exitCode: 124, timedOut: true }, quota);
+    expect(d.turnClass).toBe('free_quota');
+    expect(d.lastLogMessage).toBe('stream error');
+    expect(d.upstreamError).toStartWith('AI_APICallError: Free usage limit reached.');
+  });
+
+  test('a non-quota upstream error is reported but does not mask the timeout class', () => {
+    const other = `${LOG_STARTED}\ntimestamp=t level=ERROR run=r message="stream error" error.error="AI_APICallError: 502 Bad Gateway"`;
+    const d = diagnoseOpencodeTurn({ finalText: '', exitCode: 124, timedOut: true }, other);
+    expect(d.turnClass).toBe('stream_stall');
+    expect(d.upstreamError).toBe('AI_APICallError: 502 Bad Gateway');
   });
 
   test('timeout after the session was created → stream_stall', () => {

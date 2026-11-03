@@ -450,6 +450,10 @@ export function parseOpencodeJsonl(lines: string[]): ParsedOpencodeJsonl {
 /**
  * Failure classes for one `opencode run --format json` attempt, so a red door
  * names WHERE the turn died instead of only "Received: \"\"":
+ *  - `free_quota`: opencode's log carries the anonymous free-tier rejection
+ *    (`Free usage limit reached`). opencode does NOT exit on it — the run
+ *    idles with empty stdout until the harness kills it (observed v1.18.18
+ *    on GitHub-hosted runners). Checked first: it explains any timeout.
  *  - `startup_stall`: timed out with zero stdout events and opencode's own log
  *    never reached session creation (last log line is bootstrap `init`) —
  *    the run hung before any model call; gbrain/MCP never got involved.
@@ -459,7 +463,7 @@ export function parseOpencodeJsonl(lines: string[]): ParsedOpencodeJsonl {
  *  - `no_text`: clean exit, but no text events carried an answer.
  *  - `answered`: clean exit with text.
  */
-export type OpencodeTurnClass = 'startup_stall' | 'stream_stall' | 'exit_nonzero' | 'no_text' | 'answered';
+export type OpencodeTurnClass = 'free_quota' | 'startup_stall' | 'stream_stall' | 'exit_nonzero' | 'no_text' | 'answered';
 
 export interface OpencodeTurnDiagnosis {
   turnClass: OpencodeTurnClass;
@@ -468,7 +472,11 @@ export interface OpencodeTurnDiagnosis {
   stdoutEventCount: number;
   sessionCreated: boolean;
   lastLogMessage: string | null;
+  /** First `error.error="…"` value from a level=ERROR log line, if any. */
+  upstreamError: string | null;
 }
+
+const OPENCODE_FREE_QUOTA = /Free usage limit reached/i;
 
 /** Pure: classify one opencode attempt from its spawn result + the text of
  *  `<XDG_DATA_HOME>/opencode/log/opencode.log` (empty string when absent). */
@@ -484,16 +492,20 @@ export function diagnoseOpencodeTurn(
   const sessionCreated = messages.includes('created');
   const lastLogMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const { finalText } = parseOpencodeJsonl(stdoutLines);
+  const errLine = opencodeLog.split('\n').find((l) => /\blevel=ERROR\b/.test(l) && /\berror\.error="/.test(l));
+  const upstreamError = errLine ? (errLine.match(/\berror\.error="((?:[^"\\]|\\.)*)"/)?.[1] ?? null) : null;
 
   let turnClass: OpencodeTurnClass;
-  if (turn.timedOut) {
+  if (finalText === '' && upstreamError !== null && OPENCODE_FREE_QUOTA.test(upstreamError)) {
+    turnClass = 'free_quota';
+  } else if (turn.timedOut) {
     turnClass = stdoutEventCount === 0 && !sessionCreated ? 'startup_stall' : 'stream_stall';
   } else if (turn.exitCode !== 0) {
     turnClass = 'exit_nonzero';
   } else {
     turnClass = finalText === '' ? 'no_text' : 'answered';
   }
-  return { turnClass, exitCode: turn.exitCode, timedOut: turn.timedOut, stdoutEventCount, sessionCreated, lastLogMessage };
+  return { turnClass, exitCode: turn.exitCode, timedOut: turn.timedOut, stdoutEventCount, sessionCreated, lastLogMessage, upstreamError };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
