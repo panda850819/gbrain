@@ -447,6 +447,55 @@ export function parseOpencodeJsonl(lines: string[]): ParsedOpencodeJsonl {
   return { finalText: textParts.join('\n').trim(), toolCalls };
 }
 
+/**
+ * Failure classes for one `opencode run --format json` attempt, so a red door
+ * names WHERE the turn died instead of only "Received: \"\"":
+ *  - `startup_stall`: timed out with zero stdout events and opencode's own log
+ *    never reached session creation (last log line is bootstrap `init`) —
+ *    the run hung before any model call; gbrain/MCP never got involved.
+ *  - `stream_stall`: timed out after the session started (events or a
+ *    `created` log line exist) — model/gateway or tool round-trip hung.
+ *  - `exit_nonzero`: the process exited non-zero without timing out.
+ *  - `no_text`: clean exit, but no text events carried an answer.
+ *  - `answered`: clean exit with text.
+ */
+export type OpencodeTurnClass = 'startup_stall' | 'stream_stall' | 'exit_nonzero' | 'no_text' | 'answered';
+
+export interface OpencodeTurnDiagnosis {
+  turnClass: OpencodeTurnClass;
+  exitCode: number | null;
+  timedOut: boolean;
+  stdoutEventCount: number;
+  sessionCreated: boolean;
+  lastLogMessage: string | null;
+}
+
+/** Pure: classify one opencode attempt from its spawn result + the text of
+ *  `<XDG_DATA_HOME>/opencode/log/opencode.log` (empty string when absent). */
+export function diagnoseOpencodeTurn(
+  turn: Pick<OneShotSpawnResult, 'finalText' | 'exitCode' | 'timedOut'>,
+  opencodeLog: string,
+): OpencodeTurnDiagnosis {
+  const stdoutLines = turn.finalText.split('\n').filter((l) => l.trim() !== '');
+  const stdoutEventCount = stdoutLines.filter((l) => {
+    try { return typeof JSON.parse(l) === 'object'; } catch { return false; }
+  }).length;
+  const messages = [...opencodeLog.matchAll(/\bmessage=("([^"]*)"|\S+)/g)].map((m) => m[2] ?? m[1]);
+  const sessionCreated = messages.includes('created');
+  const lastLogMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  const { finalText } = parseOpencodeJsonl(stdoutLines);
+
+  let turnClass: OpencodeTurnClass;
+  if (turn.timedOut) {
+    turnClass = stdoutEventCount === 0 && !sessionCreated ? 'startup_stall' : 'stream_stall';
+  } else if (turn.exitCode !== 0) {
+    turnClass = 'exit_nonzero';
+  } else {
+    turnClass = finalText === '' ? 'no_text' : 'answered';
+  }
+  return { turnClass, exitCode: turn.exitCode, timedOut: turn.timedOut, stdoutEventCount, sessionCreated, lastLogMessage };
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // 5. Real-binary turns
 // ────────────────────────────────────────────────────────────────────────────

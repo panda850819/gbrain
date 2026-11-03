@@ -62,6 +62,7 @@ import {
   opencodeChildEnv,
   opencodeOneShotTurn,
   parseOpencodeJsonl,
+  diagnoseOpencodeTurn,
   hermeticChildEnv,
   stageGbrainBinDir,
   ensureCompiledGbrain,
@@ -125,6 +126,9 @@ const CHECKOUT_MARKERS = [join(REPO_ROOT, 'opencode.json'), join(REPO_ROOT, '.op
 let checkoutMarkersBefore: boolean[] = [];
 
 const EVIDENCE_DIR = process.env.GBRAIN_E2E_EVIDENCE_DIR;
+/** opencode's own run log under the hermetic XDG_DATA_HOME (written at INFO
+ *  even without --print-logs — observed v1.18.18). */
+const OPENCODE_LOG_REL = '.local/share/opencode/log/opencode.log';
 const createdHomes: { label: string; home: string }[] = [];
 function trackHome(label: string): string {
   const home = mkdtempSync(join(tmpdir(), `gb-opencode-${label}-`));
@@ -140,10 +144,16 @@ function copyEvidence(): void {
       // Copy-allowlist: configs + door transcripts only. auth.json is
       // defensively excluded (the paid leg is env-only, but a future login
       // flow must never land credentials in an artifact).
-      for (const sub of ['.config/opencode/opencode.json', '.config/opencode/opencode.jsonc', 'door-turn.jsonl']) {
+      for (const sub of [
+        '.config/opencode/opencode.json', '.config/opencode/opencode.jsonc', 'door-turn.jsonl',
+        'door-turn-attempt-1.json', 'door-turn-attempt-2.json', OPENCODE_LOG_REL,
+      ]) {
         const src = join(home, sub);
         if (existsSync(src)) {
-          try { cpSync(src, join(dst, sub.replace(/\//g, '_')), { recursive: true }); } catch { /* best-effort */ }
+          // Leading dot stripped: upload-artifact@v4 drops hidden files by
+          // default, which silently emptied the config + log evidence.
+          const flat = sub.replace(/^\./, '').replace(/\//g, '_');
+          try { cpSync(src, join(dst, flat), { recursive: true }); } catch { /* best-effort */ }
         }
       }
       // Same content-grep the CI scrub applies: an opencode-written file
@@ -433,7 +443,12 @@ describe.skipIf(!CAN_RUN_KEYLESS)('install real-opencode door — keyless tier (
     // a transient 5xx must not red the door; asserts NEVER soften.
     let finalText = '';
     let toolCalls: string[] = [];
+    const ocLog = join(home, OPENCODE_LOG_REL);
+    const readOcLog = (): string => { try { return readFileSync(ocLog, 'utf8'); } catch { return ''; } };
     for (let attempt = 1; attempt <= 2; attempt++) {
+      // Both attempts share one home, so opencode appends to one log file —
+      // diagnose each attempt against only the bytes it wrote.
+      const logOffset = readOcLog().length;
       const turn = await opencodeOneShotTurn({
         prompt,
         cwd: ws,
@@ -445,7 +460,16 @@ describe.skipIf(!CAN_RUN_KEYLESS)('install real-opencode door — keyless tier (
       const parsed = parseOpencodeJsonl(turn.finalText.split('\n'));
       finalText = parsed.finalText;
       toolCalls = parsed.toolCalls;
-      try { writeFileSync(join(home, 'door-turn.jsonl'), turn.finalText); } catch { /* evidence */ }
+      const diagnosis = diagnoseOpencodeTurn(turn, readOcLog().slice(logOffset));
+      console.warn(`[install-real-opencode] T4 attempt ${attempt}: ${JSON.stringify(diagnosis)}`);
+      try {
+        writeFileSync(join(home, 'door-turn.jsonl'), turn.finalText);
+        writeFileSync(join(home, `door-turn-attempt-${attempt}.json`), `${JSON.stringify({
+          ...diagnosis,
+          toolCalls,
+          stderrTail: turn.stderrText.slice(-4_000),
+        }, null, 2)}\n`);
+      } catch { /* evidence */ }
       if (turn.exitCode === 0 && finalText.includes(nonce)) break;
       if (attempt === 1) await new Promise((r) => setTimeout(r, 3_000));
     }

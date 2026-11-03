@@ -39,6 +39,7 @@ import {
   hasOpencodeAuth,
   seedOpencodeConfig,
   parseOpencodeJsonl,
+  diagnoseOpencodeTurn,
   runOneShotSpawn,
 } from './agent-harness.ts';
 import { withEnv } from './with-env.ts';
@@ -648,6 +649,55 @@ describe('parseOpencodeJsonl (pure — fixtures pinned to observed v1.18.18 shap
   test('empty/garbage input → empty result, never throws', () => {
     expect(parseOpencodeJsonl([])).toEqual({ finalText: '', toolCalls: [] });
     expect(parseOpencodeJsonl(['{', 'null', '42'])).toEqual({ finalText: '', toolCalls: [] });
+  });
+});
+
+describe('diagnoseOpencodeTurn (pure — log shapes observed on v1.18.18)', () => {
+  const LOG_STALLED = [
+    'timestamp=2026-11-03T00:42:18.821Z level=INFO run=909b7be1 message=bootstrapping directory=/tmp/h/ws',
+    'timestamp=2026-11-03T00:42:18.869Z level=INFO run=909b7be1 message="all formatters are disabled"',
+    'timestamp=2026-11-03T00:42:18.869Z level=INFO run=909b7be1 message=init',
+  ].join('\n');
+  const LOG_STARTED = [
+    LOG_STALLED,
+    'timestamp=2026-11-03T00:45:27.899Z level=INFO run=b98ff661 message=created id=ses_x slug=nimble-star version=1.18.18',
+    'timestamp=2026-11-03T00:45:29.014Z level=INFO run=b98ff661 message=stream providerID=opencode modelID=big-pickle',
+  ].join('\n');
+  const ANSWER = [
+    JSON.stringify({ type: 'step_start', part: {} }),
+    JSON.stringify({ type: 'text', part: { text: 'PONG' } }),
+  ].join('\n');
+
+  test('timeout + no events + log stops at init → startup_stall', () => {
+    const d = diagnoseOpencodeTurn({ finalText: '', exitCode: 124, timedOut: true }, LOG_STALLED);
+    expect(d).toEqual({
+      turnClass: 'startup_stall', exitCode: 124, timedOut: true,
+      stdoutEventCount: 0, sessionCreated: false, lastLogMessage: 'init',
+    });
+  });
+
+  test('timeout after the session was created → stream_stall', () => {
+    const d = diagnoseOpencodeTurn({ finalText: '', exitCode: 124, timedOut: true }, LOG_STARTED);
+    expect(d.turnClass).toBe('stream_stall');
+    expect(d.sessionCreated).toBe(true);
+    expect(d.lastLogMessage).toBe('stream');
+  });
+
+  test('timeout with stdout events but no log file → stream_stall', () => {
+    expect(diagnoseOpencodeTurn({ finalText: ANSWER, exitCode: 124, timedOut: true }, '').turnClass).toBe('stream_stall');
+  });
+
+  test('non-zero exit, clean exit without text, clean exit with text', () => {
+    expect(diagnoseOpencodeTurn({ finalText: '', exitCode: 1, timedOut: false }, LOG_STARTED).turnClass).toBe('exit_nonzero');
+    const stepOnly = JSON.stringify({ type: 'step_start', part: {} });
+    expect(diagnoseOpencodeTurn({ finalText: stepOnly, exitCode: 0, timedOut: false }, LOG_STARTED).turnClass).toBe('no_text');
+    expect(diagnoseOpencodeTurn({ finalText: ANSWER, exitCode: 0, timedOut: false }, LOG_STARTED).turnClass).toBe('answered');
+  });
+
+  test('absent log → null lastLogMessage, never throws', () => {
+    const d = diagnoseOpencodeTurn({ finalText: '', exitCode: 0, timedOut: false }, '');
+    expect(d.lastLogMessage).toBeNull();
+    expect(d.sessionCreated).toBe(false);
   });
 });
 
