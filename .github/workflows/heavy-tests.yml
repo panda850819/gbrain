@@ -777,6 +777,11 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'real-agent-e2e') ||
       contains(github.event.pull_request.labels.*.name, 'heavy-tests')
     runs-on: ubuntu-latest
+    # 2026-11-03 Panda／CEO: keyless free_quota on GitHub-hosted runners is
+    # NOT a merge gate (Panda does not use opencode). Job stays red-visible
+    # for free_quota／other stalls, but continue-on-error so Heavy／merge are
+    # not blocked. Canary was already non-gating. Do not weaken T4 asserts.
+    continue-on-error: true
     # Measured local door wall-time: full 6-test run 35.8s + one-time
     # compiled gbrain build (~2-4 min) + npm install (~15s); free-tier +
     # paid turn budgets 2 x 240s each. 20 min = measured + >50% headroom.
@@ -876,6 +881,15 @@ jobs:
           tail -40 door-keyless.txt
           cp door-keyless.txt "$GBRAIN_E2E_EVIDENCE_DIR/" 2>/dev/null || true
           if [ "$EXIT" -ne 0 ]; then
+            # Label free_quota when diagnose／log already named it (non-merge-gate).
+            if grep -E 'free_quota|Free usage limit reached' door-keyless.txt >/dev/null 2>&1 \
+              || grep -R -E 'free_quota|Free usage limit reached' "$GBRAIN_E2E_EVIDENCE_DIR" >/dev/null 2>&1; then
+              echo "::warning::opencode door free_quota — keyless free tier rejected on GitHub-hosted (2026-11-03 Panda／CEO: not a merge gate; see docs/mcp/OPENCODE-CLI-PIN.md). T4 asserts unchanged."
+              {
+                echo "## opencode door: free_quota (non-merge-gate)"
+                echo "Keyless T4 red classified as \`free_quota\`. Job is continue-on-error; do not weaken T4."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
             exit "$EXIT"
           fi
           # Exact expected shape for this tier: 5 keyless tests pass (T1, T2,
@@ -991,10 +1005,11 @@ jobs:
   # opencode canary: latest-version leg (schedule-scoped, continue-on-error,
   # own timeout — landed IN-WAVE, reversing the grok-style deferral, because
   # opencode ships near-continuously and a frozen pin goes stale in weeks;
-  # the pinned lane above stays the deterministic gate while this tracks
-  # what users actually run). Keyless tier only (incl. the free-tier SMOKE);
-  # no secret ever reaches this job. A red here is a PIN-REFRESH SIGNAL
-  # (OPENCODE-CLI-PIN.md §Pin-refresh cadence), never a gate.
+  # the pinned lane above is continue-on-error (2026-11-03 free_quota
+  # non-merge-gate) while this tracks what users actually run). Keyless
+  # tier only (incl. the free-tier SMOKE); no secret ever reaches this job.
+  # A red here is a PIN-REFRESH SIGNAL (OPENCODE-CLI-PIN.md §Pin-refresh
+  # cadence), never a gate — same posture as the pinned lane for merge.
   opencode-door-canary:
     name: opencode door canary (latest, keyless, non-gating)
     if: github.event_name == 'schedule'
@@ -1029,6 +1044,6 @@ jobs:
           bun test --timeout=600000 test/e2e/install-real-opencode.serial.test.ts > door-canary.txt 2>&1 || EXIT=$?
           tail -40 door-canary.txt
           if [ "$EXIT" -ne 0 ]; then
-            echo "::warning::opencode canary red against latest — pin-refresh signal (OPENCODE-CLI-PIN.md §Pin-refresh cadence); the pinned lane is the gate."
+            echo "::warning::opencode canary red against latest — pin-refresh signal (OPENCODE-CLI-PIN.md §Pin-refresh cadence); pinned lane is continue-on-error (2026-11-03 free_quota non-merge-gate), not a silent ignore."
             exit "$EXIT"
           fi
