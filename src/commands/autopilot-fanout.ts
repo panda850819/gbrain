@@ -614,12 +614,18 @@ export async function dispatchPerSource(
 
 const GLOBAL_FLOOR_MIN = 60;
 
+/** Minutes since `autopilot.last_global_at`; null when unset or unparseable. */
+export function globalMaintenanceAgeMin(lastGlobalAtIso: string | null, now = Date.now()): number | null {
+  if (!lastGlobalAtIso) return null;
+  const t = new Date(lastGlobalAtIso).getTime();
+  if (!Number.isFinite(t)) return null;
+  return (now - t) / 60_000;
+}
+
 /** Is the brain-wide maintenance overdue? Null/unparseable → overdue. */
 export function isGlobalMaintenanceStale(lastGlobalAtIso: string | null, now = Date.now(), floorMin = GLOBAL_FLOOR_MIN): boolean {
-  if (!lastGlobalAtIso) return true;
-  const d = new Date(lastGlobalAtIso);
-  if (!Number.isFinite(d.getTime())) return true;
-  return (now - d.getTime()) / 60_000 >= floorMin;
+  const ageMin = globalMaintenanceAgeMin(lastGlobalAtIso, now);
+  return ageMin === null || ageMin >= floorMin;
 }
 
 /**
@@ -637,7 +643,7 @@ export async function dispatchGlobalMaintenance(
   engine: BrainEngine,
   queue: MinionQueue,
   opts: { repoPath: string; slot: string; timeoutMs: number; jsonMode: boolean; emit?: (l: string) => void; log?: (l: string) => void },
-): Promise<{ dispatched: boolean; coalesced?: boolean; reason: 'stale' | 'fresh' }> {
+): Promise<{ dispatched: boolean; coalesced?: boolean; reason: 'stale' | 'fresh'; age_min?: number }> {
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
 
@@ -648,8 +654,15 @@ export async function dispatchGlobalMaintenance(
     if (Number.isFinite(n) && n >= 1) floorMin = n;
   }
   const lastGlobalAt = await engine.getConfig(LAST_GLOBAL_AT_KEY);
-  if (!isGlobalMaintenanceStale(lastGlobalAt, Date.now(), floorMin)) {
-    return { dispatched: false, reason: 'fresh' };
+  const now = Date.now();
+  if (!isGlobalMaintenanceStale(lastGlobalAt, now, floorMin)) {
+    const ageMin = Math.floor(globalMaintenanceAgeMin(lastGlobalAt, now) ?? 0);
+    if (opts.jsonMode) {
+      emit(JSON.stringify({ event: 'global_maintenance_skipped_fresh', last_global_at: lastGlobalAt, age_min: ageMin, floor_min: floorMin }));
+    } else {
+      log(`[dispatch] global maintenance skipped: last_global_at ${ageMin} min ago (< ${floorMin} min floor)`);
+    }
+    return { dispatched: false, reason: 'fresh', age_min: ageMin };
   }
 
   const job = await queue.add(
