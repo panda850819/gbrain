@@ -100,6 +100,7 @@ jobs:
           bun --no-env-file test --timeout=120000 \
             test/persistence-admission-observer.test.ts \
             test/persistence-journal.test.ts \
+            test/purge-managed-writer-guard.test.ts \
             test/persistence-staging.test.ts \
             test/persistence-effect-recovery-fairness.test.ts \
             test/import-publication-guards.test.ts \

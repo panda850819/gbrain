@@ -140,7 +140,9 @@ async function seedReflections(): Promise<void> {
 
 describe('global maintenance freshness postcondition (#5089)', () => {
   test('a required-phase failure stays due even when another phase succeeds', async () => {
-    const result = await handler({ id: ownerJobId, data: { phases: ['orphans', 'embed'], repoPath } } as unknown as MinionJobContext);
+    const result = await handler({ id: ownerJobId, data: { phases: ['orphans', 'embed'], repoPath } } as unknown as MinionJobContext).then(
+      () => { throw new Error('a failed required phase must fail the job'); }, (error: { name: string; report: CycleReport }) => error);
+    expect(result.name).toBe('UnrecoverableError');
     expect(result.report.status).toBe('partial');
     expect(result.report.phases.find(p => p.phase === 'embed')?.status).toBe('fail');
     const stamp = await engine.getConfig(LAST_GLOBAL_AT_KEY);
