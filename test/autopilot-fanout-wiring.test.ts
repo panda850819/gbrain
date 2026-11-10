@@ -177,7 +177,7 @@ describe('autopilot.ts ↔ dispatchPerSource wiring', () => {
     // at exactly the #2781 symptom (600s budget at the default 300s
     // interval) even after the per-source path was fixed. Pin the correct
     // wiring by source-shape: the call must pass the *full-cycle* variable.
-    const dispatchGlobalIdx = AUTOPILOT_SRC.indexOf('dispatchGlobalMaintenance(engine, queue');
+    const dispatchGlobalIdx = AUTOPILOT_SRC.indexOf('await dispatchGlobalMaintenanceTick(engine, queue');
     expect(dispatchGlobalIdx).toBeGreaterThan(-1);
     const dispatchGlobalCall = AUTOPILOT_SRC.slice(dispatchGlobalIdx, dispatchGlobalIdx + 200);
     expect(dispatchGlobalCall).toContain('timeoutMs: fullCycleTimeoutMs');
