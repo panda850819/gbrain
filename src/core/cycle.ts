@@ -1722,7 +1722,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
     // oauth_client, v64) is reported and skipped instead of aborting the sweep.
     const purgeResult = await purgeExpiredSources(engine);
     const purgedSources = purgeResult.purged;
-    const purgedPages = await engine.purgeDeletedPages(SOFT_DELETE_TTL_HOURS_FOR_PURGE);
+    const { result: purgedPages, error: pagePurgeError } = await (await import('./persistence/page-purge.ts')).settleExpiredPagePurge(engine, SOFT_DELETE_TTL_HOURS_FOR_PURGE);
     const purgedClones = await purgeOrphanClones(SOFT_DELETE_TTL_HOURS_FOR_PURGE);
     // v0.36+ folded scope item +C: GC stale op_checkpoints rows.
     // 7-day TTL is deliberately generous; any reasonable long-running op
@@ -1767,10 +1767,10 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
     }
     return {
       phase: 'purge',
-      status: 'ok',
+      status: pagePurgeError ? 'fail' : 'ok', ...(pagePurgeError ? { error: makeErrorFromException(pagePurgeError) } : {}),
       duration_ms: 0,
       summary:
-        `purged ${purgedSources.length} source(s)` +
+        (pagePurgeError ? `${purgedPages.failed.length} expired page(s) could not be purged; ` : '') + `purged ${purgedSources.length} source(s)` +
         (purgeResult.blocked.length > 0 ? ` (${purgeResult.blocked.length} FK-blocked, see details)` : '') +
         `, ${purgedPages.count} page(s), ` +
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
@@ -1784,7 +1784,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         purged_orphan_clones_count: purgedClones.count,
         purged_orphan_clone_names: purgedClones.names,
         purged_sources: purgedSources,
-        purged_page_slugs: purgedPages.slugs,
+        purged_page_slugs: purgedPages.slugs, purge_failed_pages: purgedPages.failed,
         purged_checkpoints_count: purgedCheckpoints,
         purged_brainstorm_checkpoints_count: purgedBrainstormCheckpoints,
         purged_batch_retry_audit_files_count: purgedBatchRetryAuditFiles,

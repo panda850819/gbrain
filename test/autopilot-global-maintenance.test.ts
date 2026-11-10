@@ -326,7 +326,10 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     const handler = handlers.get('autopilot-global-maintenance');
     // id present so the handler threads a real privateQueueOwnerJobId into
     // runCycle (worker jobs always carry one).
-    const result = await handler!({ id: 4101, data: { repoPath }, signal: undefined });
+    const failure = await handler!({ id: 4101, data: { repoPath }, signal: undefined }).then(
+      () => { throw new Error('a failed maintenance phase must fail the job'); }, (error: any) => error);
+    expect(failure.name).toBe('UnrecoverableError');
+    const result = failure;
     const ranPhases = result.report.phases.map((p: any) => p.phase);
     for (const p of MAINTENANCE_PHASES) expect(ranPhases).toContain(p);
     expect(ranPhases).toContain('synthesize');

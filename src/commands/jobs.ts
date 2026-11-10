@@ -2825,6 +2825,7 @@ export async function registerBuiltinHandlers(
       }
     }
 
+    (await import('../core/cycle/maintenance-outcome.ts')).assertMaintenancePhasesPassed(report);
     return {
       partial: report.status === 'partial' || report.status === 'failed',
       status: report.status,
@@ -2925,8 +2926,7 @@ export async function registerBuiltinHandlers(
     let pagesPurged = 0;
     let sourcesPurged: string[] = [];
     if (scope === 'pages' || scope === 'all') {
-      const result = await engine.purgeDeletedPages(olderThanHours);
-      pagesPurged = result.count;
+      pagesPurged = (await (await import('../core/persistence/page-purge.ts')).purgeExpiredPages(engine, olderThanHours)).count;
     }
     let sourcesBlocked: Array<{ id: string; reason: string }> = [];
     if (scope === 'sources' || scope === 'all') {

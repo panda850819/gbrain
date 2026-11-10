@@ -1,6 +1,7 @@
 import { pageMutationSource, submitPageMutation, validatePutPageDryRun } from '../persistence/page-mutations.ts';
 import { PAGE_MUTATION_PARAMS, CAPTURE_EVENT_PARAMS } from '../persistence/params.ts';
 import { assertPurgeParams } from '../persistence/purge-params.ts';
+import { purgeExpiredPages } from '../persistence/page-purge.ts';
 /**
  * Page CRUD operation cluster — pure move from operations.ts (v0.46.x
  * tranche 1). Op consts stay module-private; `pagesOperations` below lists
@@ -405,7 +406,7 @@ const purge_deleted_pages: Operation = {
   handler: async (ctx, p) => {
     const olderThanHours = (p.older_than_hours as number | undefined) ?? 72;
     if (ctx.dryRun) return { dry_run: true, action: 'purge_deleted_pages', older_than_hours: olderThanHours };
-    const result = await ctx.engine.purgeDeletedPages(olderThanHours);
+    const result = await purgeExpiredPages(ctx.engine, olderThanHours);
     return { status: 'purged', count: result.count, slugs: result.slugs };
   },
   cliHints: { name: 'purge-deleted' },
