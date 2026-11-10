@@ -180,6 +180,11 @@ non-interactive. `hermes cron tick` = run due jobs once and exit. `hermes cron l
   installer that silently ignores flags (or a moved checkout layout, or a moved tag) can
   never run unpinned upstream code on a runner that later holds secrets.
 - `HERMES_INSTALL_SHA256: "034845e34289813ff5fb7fd3e071ec69f6b14aee8ba297a477b31dda6374cb86"`
+- Known failure (2026-11-10): upstream `install.sh` no longer matches this digest, so the
+  install step fails (`hermes-install.sh: FAILED`). The pin is kept deliberately; the
+  `hermes-door` job is `continue-on-error: true` (red-visible, non-gating) and writes
+  "Hermes door: known failure (installer digest drift), not gating" to the job summary.
+  Re-pin per the installer review record above, then drop `continue-on-error`.
 - Door test asserts `hermes --version` output contains `v$HERMES_VERSION` when the env var is set.
 - `hermes --version` output shape: `Hermes Agent v0.21.6 (2026.9.24) · upstream <sha>` + install
   dir, install method, Python, OpenAI SDK lines (+ an `Update available` line when main has moved).
